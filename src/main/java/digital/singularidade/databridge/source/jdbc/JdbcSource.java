@@ -428,7 +428,66 @@ public final class JdbcSource implements Source {
         };
     }
 
-    @Override public List<ColumnStats> columnStats(String schema, String table) { throw new UnsupportedOperationException("Task 16"); }
+    @Override
+    public List<ColumnStats> columnStats(String schema, String table) {
+        if (hints != DriverHints.PG) return List.of();
+        String sql = """
+            SELECT attname, n_distinct, null_frac,
+                   most_common_vals::text AS mcv,
+                   most_common_freqs::text AS mcf,
+                   correlation
+              FROM pg_stats
+             WHERE schemaname = ? AND tablename = ?
+            """;
+        List<ColumnStats> out = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("attname");
+                    Long nDist = rs.getObject("n_distinct") == null ? null : rs.getLong("n_distinct");
+                    Double nullFrac = rs.getObject("null_frac") == null ? null : rs.getDouble("null_frac");
+                    List<String> mcv = parseTextArray(rs.getString("mcv"));
+                    List<Double> mcf = parseFloatArray(rs.getString("mcf"));
+                    Double corr = rs.getObject("correlation") == null ? null : rs.getDouble("correlation");
+                    out.add(new ColumnStats(name, nDist, nullFrac, mcv, mcf, corr));
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "columnStats failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
+    private static List<String> parseTextArray(String pgArray) {
+        if (pgArray == null || pgArray.isEmpty() || pgArray.equals("{}")) return List.of();
+        String inner = pgArray.substring(1, pgArray.length() - 1);
+        if (inner.isEmpty()) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String part : inner.split(",")) {
+            String trimmed = part.trim();
+            if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+                trimmed = trimmed.substring(1, trimmed.length() - 1);
+            }
+            out.add(trimmed);
+        }
+        return out;
+    }
+
+    private static List<Double> parseFloatArray(String pgArray) {
+        if (pgArray == null || pgArray.isEmpty() || pgArray.equals("{}")) return List.of();
+        String inner = pgArray.substring(1, pgArray.length() - 1);
+        if (inner.isEmpty()) return List.of();
+        List<Double> out = new ArrayList<>();
+        for (String part : inner.split(",")) {
+            try {
+                out.add(Double.parseDouble(part.trim()));
+            } catch (NumberFormatException e) { /* skip */ }
+        }
+        return out;
+    }
     @Override public Partitioning partitioning(String schema, String table) { throw new UnsupportedOperationException("Task 17"); }
     @Override public Cardinality cardinality(String schema, String table, List<Column> columns) { throw new UnsupportedOperationException("Task 18"); }
 
