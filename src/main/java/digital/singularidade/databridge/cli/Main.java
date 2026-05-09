@@ -7,7 +7,7 @@ import picocli.CommandLine.Command;
     name = "data-bridge",
     mixinStandardHelpOptions = true,
     versionProvider = Main.VersionProvider.class,
-    subcommands = { VersionCommand.class }
+    subcommands = { VersionCommand.class, ExtractCommand.class }
 )
 public final class Main implements Runnable {
 
