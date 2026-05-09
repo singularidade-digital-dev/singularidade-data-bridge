@@ -22,6 +22,7 @@ public final class HttpServer implements AutoCloseable {
         app.get("/v1/health", new HealthHandler());
         app.get("/v1/version", HealthHandler.version());
         app.post("/v1/extract", new ExtractHandler(pools));
+        app.get("/v1/list-tables", new ListTablesHandler(pools));
         app.start(port);
         return new HttpServer(app, pools);
     }
