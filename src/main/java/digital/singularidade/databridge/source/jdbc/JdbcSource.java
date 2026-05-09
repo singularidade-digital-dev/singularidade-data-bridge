@@ -368,8 +368,64 @@ public final class JdbcSource implements Source {
         return out;
     }
 
-    // ===== stubs for subsequent tasks =====
-    @Override public TableInfo tableInfo(String schema, String table) { throw new UnsupportedOperationException("Task 19"); }
+    @Override
+    public TableInfo tableInfo(String schema, String table) {
+        String type = "TABLE";
+        String comment = null;
+        String owner = null;
+        Long approxRows = null;
+        String viewDef = null;
+
+        // Determine type via DatabaseMetaData
+        try (ResultSet rs = connection.getMetaData()
+                .getTables(connection.getCatalog(), schema, table, null)) {
+            if (rs.next()) {
+                String t = rs.getString("TABLE_TYPE");
+                type = switch (t == null ? "" : t.toUpperCase()) {
+                    case "VIEW" -> "VIEW";
+                    case "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
+                    case "PARTITIONED TABLE", "FOREIGN TABLE" -> "TABLE";
+                    default -> "TABLE";
+                };
+                comment = rs.getString("REMARKS");
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "tableInfo (type) failed: " + e.getMessage(), null, e);
+        }
+
+        if (hints == DriverHints.PG) {
+            String sql = """
+                SELECT pg_get_userbyid(c.relowner) AS owner,
+                       c.reltuples::bigint AS approx_rows,
+                       CASE WHEN c.relkind = 'v' OR c.relkind = 'm'
+                            THEN pg_get_viewdef(c.oid, true) ELSE NULL END AS view_def,
+                       CASE WHEN c.relkind = 'p' THEN 'PARTITIONED_TABLE' ELSE NULL END AS partitioned_type
+                  FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = ? AND c.relname = ?
+                """;
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                ps.setString(2, table);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        owner = rs.getString("owner");
+                        long ar = rs.getLong("approx_rows");
+                        if (!rs.wasNull()) approxRows = ar;
+                        viewDef = rs.getString("view_def");
+                        String pt = rs.getString("partitioned_type");
+                        if (pt != null) type = pt;
+                    }
+                }
+            } catch (SQLException e) {
+                throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                    "tableInfo (PG augment) failed: " + e.getMessage(), null, e);
+            }
+        }
+
+        return new TableInfo(type, comment, owner, approxRows, viewDef);
+    }
 
     @Override
     public Sample sample(String schema, String table, int limit) {
