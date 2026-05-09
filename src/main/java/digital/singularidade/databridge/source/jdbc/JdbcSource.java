@@ -488,7 +488,52 @@ public final class JdbcSource implements Source {
         }
         return out;
     }
-    @Override public Partitioning partitioning(String schema, String table) { throw new UnsupportedOperationException("Task 17"); }
+    @Override
+    public Partitioning partitioning(String schema, String table) {
+        if (hints != DriverHints.PG) {
+            return new Partitioning(false, null, List.of(), null, List.of());
+        }
+        String checkSql = """
+            SELECT pt.partstrat, pg_get_partkeydef(c.oid) AS pkdef
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN pg_partitioned_table pt ON pt.partrelid = c.oid
+             WHERE n.nspname = ? AND c.relname = ?
+            """;
+        String strategy = null;
+        List<String> key = List.of();
+        boolean isPartitioned = false;
+        try (PreparedStatement ps = connection.prepareStatement(checkSql)) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String s = rs.getString("partstrat");
+                    if (s != null) {
+                        isPartitioned = true;
+                        strategy = switch (s) {
+                            case "r" -> "RANGE";
+                            case "l" -> "LIST";
+                            case "h" -> "HASH";
+                            default -> s.toUpperCase();
+                        };
+                        String pkdef = rs.getString("pkdef");
+                        if (pkdef != null) {
+                            int open = pkdef.indexOf('('), close = pkdef.lastIndexOf(')');
+                            if (open >= 0 && close > open) {
+                                String inner = pkdef.substring(open + 1, close);
+                                key = Arrays.stream(inner.split(",")).map(String::trim).toList();
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "partitioning failed: " + e.getMessage(), null, e);
+        }
+        return new Partitioning(isPartitioned, strategy, key, null, List.of());
+    }
     @Override public Cardinality cardinality(String schema, String table, List<Column> columns) { throw new UnsupportedOperationException("Task 18"); }
 
     @Override
