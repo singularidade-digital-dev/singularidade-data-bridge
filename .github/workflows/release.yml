@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write   # required to create the GitHub Release
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build & verify (full test suite must pass before release)
+        run: mvn -B -ntp verify
+
+      - name: Smoke-check the fat JAR
+        run: |
+          test -f target/data-bridge.jar
+          java -jar target/data-bridge.jar version
+
+      - name: Stage release artifacts
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release
+          cp target/data-bridge.jar "release/data-bridge-${TAG}.jar"
+          ( cd release && sha256sum "data-bridge-${TAG}.jar" > "data-bridge-${TAG}.jar.sha256" )
+          ls -la release/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            "release/data-bridge-${TAG}.jar" \
+            "release/data-bridge-${TAG}.jar.sha256"
