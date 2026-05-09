@@ -40,7 +40,7 @@
 
         <junit.version>5.11.4</junit.version>
         <assertj.version>3.26.3</assertj.version>
-        <testcontainers.version>1.20.4</testcontainers.version>
+        <testcontainers.version>1.21.2</testcontainers.version>
         <h2.version>2.3.232</h2.version>
 
         <compiler.plugin.version>3.13.0</compiler.plugin.version>
@@ -188,6 +188,12 @@
                     <includes>
                         <include>**/*IT.java</include>
                     </includes>
+                    <!-- Docker daemon ≥ 29.x enforces min API 1.40;
+                         docker-java shaded in Testcontainers defaults to 1.32.
+                         Setting api.version here forces negotiation to 1.41. -->
+                    <systemPropertyVariables>
+                        <api.version>1.41</api.version>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
             <plugin>
