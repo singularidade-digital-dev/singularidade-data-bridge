@@ -20,10 +20,10 @@ CREATE TABLE atl.cliente (
     foto BYTEA,
     datanascimento DATE,
     sexo CHAR(1),
+    CONSTRAINT uk_cliente_cpf UNIQUE (cpf),
     CONSTRAINT chk_cliente_sexo CHECK (sexo IN ('M','F','O'))
 );
 CREATE INDEX idx_cliente_cpf ON atl.cliente(cpf);
-CREATE UNIQUE INDEX uk_cliente_cpf ON atl.cliente(cpf);
 COMMENT ON TABLE atl.cliente IS 'Cadastro de pacientes';
 
 CREATE VIEW atl.cliente_vw AS SELECT id, nome FROM atl.cliente;

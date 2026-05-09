@@ -299,10 +299,70 @@ public final class JdbcSource implements Source {
 
     private record PgIndexAugment(String method, String where) {}
 
+    @Override
+    public List<UniqueConstraint> uniqueConstraints(String schema, String table) {
+        String sql = """
+            SELECT tc.constraint_name, kcu.column_name, kcu.ordinal_position
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+               AND tc.table_schema    = kcu.table_schema
+             WHERE tc.constraint_type = 'UNIQUE'
+               AND tc.table_schema    = ?
+               AND tc.table_name      = ?
+             ORDER BY tc.constraint_name, kcu.ordinal_position
+            """;
+        Map<String, List<String>> grouped = new LinkedHashMap<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    grouped.computeIfAbsent(rs.getString("constraint_name"), k -> new ArrayList<>())
+                        .add(rs.getString("column_name"));
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "uniqueConstraints failed: " + e.getMessage(), null, e);
+        }
+        List<UniqueConstraint> out = new ArrayList<>();
+        grouped.forEach((name, cols) -> out.add(new UniqueConstraint(name, List.copyOf(cols))));
+        return out;
+    }
+
+    @Override
+    public List<CheckConstraint> checkConstraints(String schema, String table) {
+        String sql = """
+            SELECT cc.constraint_name, cc.check_clause
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.check_constraints cc
+                ON tc.constraint_name  = cc.constraint_name
+               AND tc.constraint_schema = cc.constraint_schema
+             WHERE tc.constraint_type = 'CHECK'
+               AND tc.table_schema    = ?
+               AND tc.table_name      = ?
+               AND cc.constraint_name NOT LIKE '%_not_null'
+             ORDER BY cc.constraint_name
+            """;
+        List<CheckConstraint> out = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new CheckConstraint(rs.getString("constraint_name"), rs.getString("check_clause")));
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "checkConstraints failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
     // ===== stubs for subsequent tasks =====
     @Override public TableInfo tableInfo(String schema, String table) { throw new UnsupportedOperationException("Task 19"); }
-    @Override public List<UniqueConstraint> uniqueConstraints(String schema, String table) { throw new UnsupportedOperationException("Task 14"); }
-    @Override public List<CheckConstraint> checkConstraints(String schema, String table) { throw new UnsupportedOperationException("Task 14"); }
     @Override public Sample sample(String schema, String table, int limit) { throw new UnsupportedOperationException("Task 15"); }
     @Override public List<ColumnStats> columnStats(String schema, String table) { throw new UnsupportedOperationException("Task 16"); }
     @Override public Partitioning partitioning(String schema, String table) { throw new UnsupportedOperationException("Task 17"); }
