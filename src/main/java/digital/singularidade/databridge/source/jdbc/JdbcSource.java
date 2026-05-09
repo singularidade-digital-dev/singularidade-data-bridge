@@ -59,6 +59,11 @@ public final class JdbcSource implements Source {
         }
     }
 
+    public static JdbcSource wrap(Connection c, DriverHints hints) {
+        try { c.setReadOnly(true); } catch (SQLException ignored) {}
+        return new JdbcSource(c, hints);
+    }
+
     Connection connection() { return connection; }
     DriverHints hints() { return hints; }
 
