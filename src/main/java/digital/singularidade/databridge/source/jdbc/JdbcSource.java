@@ -17,12 +17,16 @@ import digital.singularidade.databridge.source.Source;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeMap;
 
 public final class JdbcSource implements Source {
@@ -220,9 +224,83 @@ public final class JdbcSource implements Source {
         }
     }
 
+    @Override
+    public List<Index> indexes(String schema, String table) {
+        Map<String, IndexBuilder> grouped = new LinkedHashMap<>();
+        try (ResultSet rs = connection.getMetaData()
+                .getIndexInfo(connection.getCatalog(), schema, table, false, false)) {
+            while (rs.next()) {
+                String name = rs.getString("INDEX_NAME");
+                if (name == null) continue;
+                String col = rs.getString("COLUMN_NAME");
+                if (col == null) continue;
+                String ascDesc = rs.getString("ASC_OR_DESC");
+                boolean asc = ascDesc == null || "A".equalsIgnoreCase(ascDesc);
+                boolean nonUnique = rs.getBoolean("NON_UNIQUE");
+                IndexBuilder b = grouped.computeIfAbsent(name,
+                    k -> new IndexBuilder(name, !nonUnique));
+                b.columns.add(col);
+                b.ordinalAsc.add(asc);
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "indexes failed: " + e.getMessage(), null, e);
+        }
+        Map<String, PgIndexAugment> augments = (hints == DriverHints.PG)
+            ? pgIndexAugments(schema, table) : Collections.emptyMap();
+        List<String> pk = primaryKey(schema, table);
+        List<Index> out = new ArrayList<>();
+        for (IndexBuilder b : grouped.values()) {
+            boolean primary = !pk.isEmpty() && pk.equals(b.columns);
+            PgIndexAugment a = augments.get(b.name);
+            out.add(new Index(b.name, List.copyOf(b.columns), List.copyOf(b.ordinalAsc),
+                b.unique, primary, a != null ? a.method() : null, a != null ? a.where() : null));
+        }
+        return out;
+    }
+
+    private Map<String, PgIndexAugment> pgIndexAugments(String schema, String table) {
+        Map<String, PgIndexAugment> out = new HashMap<>();
+        String sql = """
+            SELECT i.indexname, am.amname AS method,
+                   pg_get_expr(ix.indpred, ix.indrelid) AS where_clause
+              FROM pg_indexes i
+              JOIN pg_class c   ON c.relname = i.indexname
+              JOIN pg_index ix  ON ix.indexrelid = c.oid
+              JOIN pg_class tc  ON tc.oid = ix.indrelid
+              JOIN pg_namespace n ON n.oid = tc.relnamespace
+              JOIN pg_am am     ON am.oid = c.relam
+             WHERE n.nspname = ? AND tc.relname = ?
+            """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.put(rs.getString("indexname"),
+                        new PgIndexAugment(rs.getString("method"), rs.getString("where_clause")));
+                }
+            }
+        } catch (SQLException ignored) { /* no augment, return what we have */ }
+        return out;
+    }
+
+    private static final class IndexBuilder {
+        final String name;
+        final boolean unique;
+        final List<String> columns = new ArrayList<>();
+        final List<Boolean> ordinalAsc = new ArrayList<>();
+
+        IndexBuilder(String name, boolean unique) {
+            this.name = name;
+            this.unique = unique;
+        }
+    }
+
+    private record PgIndexAugment(String method, String where) {}
+
     // ===== stubs for subsequent tasks =====
     @Override public TableInfo tableInfo(String schema, String table) { throw new UnsupportedOperationException("Task 19"); }
-    @Override public List<Index> indexes(String schema, String table) { throw new UnsupportedOperationException("Task 13"); }
     @Override public List<UniqueConstraint> uniqueConstraints(String schema, String table) { throw new UnsupportedOperationException("Task 14"); }
     @Override public List<CheckConstraint> checkConstraints(String schema, String table) { throw new UnsupportedOperationException("Task 14"); }
     @Override public Sample sample(String schema, String table, int limit) { throw new UnsupportedOperationException("Task 15"); }
