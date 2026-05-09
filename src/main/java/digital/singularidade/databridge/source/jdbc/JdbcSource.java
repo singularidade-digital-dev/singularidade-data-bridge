@@ -18,8 +18,10 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeMap;
 
 public final class JdbcSource implements Source {
 
@@ -63,10 +65,74 @@ public final class JdbcSource implements Source {
         return out;
     }
 
+    @Override
+    public List<Column> columns(String schema, String table) {
+        List<String> pk = primaryKey(schema, table);
+        List<Column> out = new ArrayList<>();
+        try (ResultSet rs = connection.getMetaData()
+                .getColumns(connection.getCatalog(), schema, table, "%")) {
+            while (rs.next()) {
+                String name = rs.getString("COLUMN_NAME");
+                int jdbcType = rs.getInt("DATA_TYPE");
+                String typeName = rs.getString("TYPE_NAME");
+                int colSize = rs.getInt("COLUMN_SIZE");
+                Integer maxLen = (jdbcType == Types.VARCHAR
+                    || jdbcType == Types.NVARCHAR
+                    || jdbcType == Types.CHAR
+                    || jdbcType == Types.NCHAR) ? colSize : null;
+                Integer precision = (jdbcType == Types.NUMERIC
+                    || jdbcType == Types.DECIMAL
+                    || jdbcType == Types.BIGINT
+                    || jdbcType == Types.INTEGER
+                    || jdbcType == Types.SMALLINT) ? colSize : null;
+                Integer scale = rs.getObject("DECIMAL_DIGITS") == null
+                    ? null : rs.getInt("DECIMAL_DIGITS");
+                String defaultValue = rs.getString("COLUMN_DEF");
+                String remarks = rs.getString("REMARKS");
+                int ord = rs.getInt("ORDINAL_POSITION");
+                boolean nullable = "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE"));
+                boolean isAutoincrement = "YES".equalsIgnoreCase(rs.getString("IS_AUTOINCREMENT"));
+                boolean isGenerated = "YES".equalsIgnoreCase(rs.getString("IS_GENERATEDCOLUMN"));
+                String generationExpr = rs.getString("COLUMN_DEF");
+
+                String sqlType = TypeNormalization.toSqlType(
+                    jdbcType, typeName, maxLen, precision, scale);
+
+                Column.Generated gen = new Column.Generated(
+                    isAutoincrement, isGenerated && !isAutoincrement,
+                    isGenerated && !isAutoincrement ? generationExpr : null);
+
+                out.add(new Column(
+                    name, ord, sqlType, jdbcType, nullable, pk.contains(name),
+                    maxLen, precision, scale,
+                    defaultValue, remarks,
+                    gen, null, null
+                ));
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "columns failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
+    @Override
+    public List<String> primaryKey(String schema, String table) {
+        List<String> out = new ArrayList<>();
+        try (ResultSet rs = connection.getMetaData()
+                .getPrimaryKeys(connection.getCatalog(), schema, table)) {
+            TreeMap<Short, String> ordered = new TreeMap<>();
+            while (rs.next()) ordered.put(rs.getShort("KEY_SEQ"), rs.getString("COLUMN_NAME"));
+            out.addAll(ordered.values());
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "primaryKey failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
     // ===== stubs for subsequent tasks =====
     @Override public TableInfo tableInfo(String schema, String table) { throw new UnsupportedOperationException("Task 19"); }
-    @Override public List<Column> columns(String schema, String table) { throw new UnsupportedOperationException("Task 10"); }
-    @Override public List<String> primaryKey(String schema, String table) { throw new UnsupportedOperationException("Task 11"); }
     @Override public List<ForeignKey> foreignKeys(String schema, String table) { throw new UnsupportedOperationException("Task 12"); }
     @Override public List<Index> indexes(String schema, String table) { throw new UnsupportedOperationException("Task 13"); }
     @Override public List<UniqueConstraint> uniqueConstraints(String schema, String table) { throw new UnsupportedOperationException("Task 14"); }
