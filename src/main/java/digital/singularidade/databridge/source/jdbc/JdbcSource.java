@@ -16,12 +16,19 @@ import digital.singularidade.databridge.source.Source;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Time;
+import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -363,7 +370,64 @@ public final class JdbcSource implements Source {
 
     // ===== stubs for subsequent tasks =====
     @Override public TableInfo tableInfo(String schema, String table) { throw new UnsupportedOperationException("Task 19"); }
-    @Override public Sample sample(String schema, String table, int limit) { throw new UnsupportedOperationException("Task 15"); }
+
+    @Override
+    public Sample sample(String schema, String table, int limit) {
+        String fqn = quoteIdent(schema) + "." + quoteIdent(table);
+        String sql = "SELECT * FROM " + fqn + " LIMIT " + limit;
+        List<Map<String, Object>> rows = new ArrayList<>();
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            ResultSetMetaData md = rs.getMetaData();
+            int n = md.getColumnCount();
+            while (rs.next()) {
+                LinkedHashMap<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= n; i++) {
+                    String name = md.getColumnLabel(i);
+                    int type = md.getColumnType(i);
+                    Object value = readColumnValue(rs, i, type);
+                    row.put(name, value);
+                }
+                rows.add(row);
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "sample failed: " + e.getMessage(), null, e);
+        }
+        return new Sample(rows.size(), rows);
+    }
+
+    private Object readColumnValue(ResultSet rs, int idx, int jdbcType) throws SQLException {
+        if (jdbcType == Types.BLOB
+            || jdbcType == Types.BINARY
+            || jdbcType == Types.VARBINARY
+            || jdbcType == Types.LONGVARBINARY) {
+            byte[] bytes = rs.getBytes(idx);
+            if (bytes == null) return null;
+            int previewLen = Math.min(64, bytes.length);
+            byte[] preview = Arrays.copyOf(bytes, previewLen);
+            return Map.of(
+                "_blob", true,
+                "size", bytes.length,
+                "preview", Base64.getEncoder().encodeToString(preview)
+            );
+        }
+        Object obj = rs.getObject(idx);
+        if (obj instanceof Timestamp ts) return ts.toInstant().toString();
+        if (obj instanceof Date d) return d.toLocalDate().toString();
+        if (obj instanceof Time t) return t.toLocalTime().toString();
+        return obj;
+    }
+
+    private String quoteIdent(String ident) {
+        return switch (hints) {
+            case PG, ORACLE -> "\"" + ident.replace("\"", "\"\"") + "\"";
+            case MSSQL -> "[" + ident.replace("]", "]]") + "]";
+            case MYSQL -> "`" + ident.replace("`", "``") + "`";
+            case FIREBIRD -> "\"" + ident.replace("\"", "\"\"") + "\"";
+        };
+    }
+
     @Override public List<ColumnStats> columnStats(String schema, String table) { throw new UnsupportedOperationException("Task 16"); }
     @Override public Partitioning partitioning(String schema, String table) { throw new UnsupportedOperationException("Task 17"); }
     @Override public Cardinality cardinality(String schema, String table, List<Column> columns) { throw new UnsupportedOperationException("Task 18"); }
