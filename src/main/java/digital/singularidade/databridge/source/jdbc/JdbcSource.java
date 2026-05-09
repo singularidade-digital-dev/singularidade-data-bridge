@@ -534,7 +534,39 @@ public final class JdbcSource implements Source {
         }
         return new Partitioning(isPartitioned, strategy, key, null, List.of());
     }
-    @Override public Cardinality cardinality(String schema, String table, List<Column> columns) { throw new UnsupportedOperationException("Task 18"); }
+    @Override
+    public Cardinality cardinality(String schema, String table, List<Column> columns) {
+        String fqn = quoteIdent(schema) + "." + quoteIdent(table);
+        long total;
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqn)) {
+            rs.next();
+            total = rs.getLong(1);
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "cardinality count(*) failed: " + e.getMessage(), null, e);
+        }
+
+        List<Cardinality.PerColumn> per = new ArrayList<>();
+        for (Column c : columns) {
+            String colQ = quoteIdent(c.name());
+            long dist = 0L;
+            long nullCount = 0L;
+            try (Statement st = connection.createStatement();
+                 ResultSet rs = st.executeQuery(
+                     "SELECT COUNT(DISTINCT " + colQ + "), SUM(CASE WHEN " + colQ
+                     + " IS NULL THEN 1 ELSE 0 END) FROM " + fqn)) {
+                rs.next();
+                dist = rs.getLong(1);
+                nullCount = rs.getLong(2);
+            } catch (SQLException e) {
+                throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                    "cardinality of " + c.name() + " failed: " + e.getMessage(), null, e);
+            }
+            per.add(new Cardinality.PerColumn(c.name(), dist, nullCount));
+        }
+        return new Cardinality(total, per);
+    }
 
     @Override
     public void close() {
