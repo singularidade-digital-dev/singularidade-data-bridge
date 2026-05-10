@@ -343,12 +343,15 @@ CI runs the full `mvn -B verify` on every push and pull request — see [`.githu
 
 ### Cutting a release
 
+Recommended:
+
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+scripts/release.sh 0.2.0
 ```
 
-The release workflow takes it from there. (For now, the version string in `pom.xml`, `Main.VersionProvider`, and `MetadataPipeline.GENERATOR_VERSION` is updated by hand before tagging — automation for that is on the post-MVP list.)
+This bumps `pom.xml`, runs the full test suite, commits, tags `v0.2.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
+
+Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
 
 ### Project conventions
 

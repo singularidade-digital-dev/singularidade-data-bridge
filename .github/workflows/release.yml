@@ -3,9 +3,15 @@ name: Release
 on:
   push:
     tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (must match vX.Y.Z[-suffix], e.g. v0.2.0)'
+        required: true
+        type: string
 
 permissions:
-  contents: write   # required to create the GitHub Release
+  contents: write   # required to create the tag and the GitHub Release
 
 jobs:
   release:
@@ -15,6 +21,41 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so we can tag from HEAD when dispatched
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          PUSHED_TAG: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            TAG="$DISPATCH_VERSION"
+          else
+            TAG="$PUSHED_TAG"
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::tag '$TAG' does not match vMAJOR.MINOR.PATCH[-suffix]"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (event: $EVENT)"
+
+      - name: Create and push tag (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          if git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::tag ${TAG} already exists locally"
+            exit 1
+          fi
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
 
       - name: Set up JDK 21 (Temurin)
         uses: actions/setup-java@v4
@@ -33,7 +74,7 @@ jobs:
 
       - name: Stage release artifacts
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           mkdir -p release
           cp target/data-bridge.jar "release/data-bridge-${TAG}.jar"
@@ -43,7 +84,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           gh release create "$TAG" \
             --title "$TAG" \
