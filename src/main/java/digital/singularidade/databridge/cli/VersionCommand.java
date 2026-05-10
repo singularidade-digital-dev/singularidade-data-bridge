@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.cli;
 
+import digital.singularidade.databridge.BuildInfo;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Spec;
 import picocli.CommandLine.Model.CommandSpec;
@@ -11,6 +12,6 @@ public final class VersionCommand implements Runnable {
 
     @Override
     public void run() {
-        spec.commandLine().getParent().getOut().println("singularidade-data-bridge 0.1.0");
+        spec.commandLine().getParent().getOut().println(BuildInfo.NAME + " " + BuildInfo.VERSION);
     }
 }

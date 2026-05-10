@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.server;
 
+import digital.singularidade.databridge.BuildInfo;
 import io.javalin.http.Context;
 import io.javalin.http.Handler;
 import org.jetbrains.annotations.NotNull;
@@ -14,7 +15,7 @@ public final class HealthHandler implements Handler {
 
     public static Handler version() {
         return ctx -> ctx.json(Map.of(
-            "name", "singularidade-data-bridge",
-            "version", "0.1.0"));
+            "name", BuildInfo.NAME,
+            "version", BuildInfo.VERSION));
     }
 }

@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.cli;
 
+import digital.singularidade.databridge.BuildInfo;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 
@@ -23,7 +24,7 @@ public final class Main implements Runnable {
 
     static final class VersionProvider implements CommandLine.IVersionProvider {
         @Override public String[] getVersion() {
-            return new String[] { "singularidade-data-bridge 0.1.0" };
+            return new String[] { BuildInfo.NAME + " " + BuildInfo.VERSION };
         }
     }
 }

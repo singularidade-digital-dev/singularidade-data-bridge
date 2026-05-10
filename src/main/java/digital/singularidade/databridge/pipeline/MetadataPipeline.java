@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.pipeline;
 
+import digital.singularidade.databridge.BuildInfo;
 import digital.singularidade.databridge.error.UrlRedaction;
 import digital.singularidade.databridge.output.Cardinality;
 import digital.singularidade.databridge.output.CheckConstraint;
