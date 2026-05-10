@@ -72,9 +72,17 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<String> listTables(String schema) {
+        return listTables(schema, false);
+    }
+
+    @Override
+    public List<String> listTables(String schema, boolean includeViews) {
+        String[] types = includeViews
+            ? new String[]{"TABLE", "VIEW", "MATERIALIZED VIEW"}
+            : new String[]{"TABLE"};
         List<String> out = new ArrayList<>();
         try (ResultSet rs = connection.getMetaData()
-                .getTables(connection.getCatalog(), schema, "%", new String[]{"TABLE"})) {
+                .getTables(connection.getCatalog(), schema, "%", types)) {
             while (rs.next()) out.add(rs.getString("TABLE_NAME"));
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.QUERY_FAILED,

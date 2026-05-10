@@ -18,6 +18,52 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ExtractAllCommandIT {
 
     @Test
+    void exclude_skips_named_tables(@TempDir Path tmp) throws Exception {
+        try (PgFixture fx = new PgFixture()) {
+            int exit = new CommandLine(new Main())
+                .setErr(new PrintWriter(OutputStream.nullOutputStream()))
+                .execute(
+                    "extract-all",
+                    "--jdbc-url", fx.jdbcUrl(),
+                    "--schema", "atl",
+                    "--out", tmp.toString(),
+                    "--exclude", "estadocivil"
+                );
+            assertThat(exit).isZero();
+            assertThat(tmp.resolve("atl.estadocivil")).doesNotExist();
+            assertThat(tmp.resolve("atl.cliente").resolve("metadata.json")).exists();
+
+            ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
+            JsonNode index = m.readTree(Files.readString(tmp.resolve("_index.json")));
+            assertThat(index.get("tableCount").asInt()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void include_views_pulls_in_view_definitions(@TempDir Path tmp) throws Exception {
+        try (PgFixture fx = new PgFixture()) {
+            int exit = new CommandLine(new Main())
+                .setErr(new PrintWriter(OutputStream.nullOutputStream()))
+                .execute(
+                    "extract-all",
+                    "--jdbc-url", fx.jdbcUrl(),
+                    "--schema", "atl",
+                    "--out", tmp.toString(),
+                    "--include-views"
+                );
+            assertThat(exit).isZero();
+            // The PG fixture includes a view: atl.cliente_vw
+            assertThat(tmp.resolve("atl.cliente_vw").resolve("metadata.json")).exists();
+
+            ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
+            JsonNode viewMeta = m.readTree(Files.readString(
+                tmp.resolve("atl.cliente_vw").resolve("metadata.json")));
+            assertThat(viewMeta.get("tableInfo").get("type").asText()).isEqualTo("VIEW");
+            assertThat(viewMeta.get("tableInfo").get("viewDefinition").asText()).contains("SELECT");
+        }
+    }
+
+    @Test
     void extracts_every_table_into_its_own_directory_and_writes_index(@TempDir Path tmp) throws Exception {
         try (PgFixture fx = new PgFixture()) {
             int exit = new CommandLine(new Main())

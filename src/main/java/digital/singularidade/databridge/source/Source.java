@@ -32,5 +32,10 @@ public interface Source extends AutoCloseable {
 
     List<String> listTables(String schema);
 
+    /** Same as {@link #listTables(String)} but optionally includes views (and materialized views, where supported). */
+    default List<String> listTables(String schema, boolean includeViews) {
+        return listTables(schema);
+    }
+
     @Override void close();
 }

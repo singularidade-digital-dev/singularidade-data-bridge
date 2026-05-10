@@ -21,7 +21,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 
 @Command(name = "extract-all",
@@ -40,6 +42,15 @@ public final class ExtractAllCommand implements Callable<Integer> {
 
     @Option(names = "--tsv", defaultValue = "false") boolean tsv;
     @Option(names = "--no-cardinality", defaultValue = "false") boolean skipCardinality;
+
+    @Option(names = "--include-views", defaultValue = "false",
+            description = "Also extract views and materialized views (default: tables only).")
+    boolean includeViews;
+
+    @Option(names = "--exclude", arity = "*",
+            description = "Table name(s) to skip. Repeatable: --exclude audit_log --exclude staging.")
+    List<String> excludes = new ArrayList<>();
+
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
     @Option(names = {"-v", "--verbose"}, defaultValue = "false") boolean verbose;
 
@@ -47,8 +58,14 @@ public final class ExtractAllCommand implements Callable<Integer> {
     public Integer call() {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
-            List<String> tables = src.listTables(schema);
-            progress.printf("Found %d table(s) in schema '%s'%n", tables.size(), schema);
+            Set<String> excludeSet = new HashSet<>(excludes);
+            List<String> tables = src.listTables(schema, includeViews).stream()
+                .filter(t -> !excludeSet.contains(t))
+                .toList();
+            progress.printf("Found %d table(s) in schema '%s'%s%s%n",
+                tables.size(), schema,
+                includeViews ? " (incl. views)" : "",
+                excludeSet.isEmpty() ? "" : " (excluded " + excludeSet.size() + ")");
 
             List<ExtractAllIndex.TableSummary> summaries = new ArrayList<>();
             for (int i = 0; i < tables.size(); i++) {
