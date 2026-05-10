@@ -38,8 +38,9 @@ public final class ExtractCommand implements Callable<Integer> {
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
             Metadata m = new MetadataPipeline(progress, skipCardinality)
                 .run(src, jdbcUrl, schema, table, sampleRows);
-            new JsonWriter().write(m, outDir.resolve("metadata.json"));
-            if (tsv) new TsvWriter().writeAll(m, outDir);
+            Path tableDir = targetDir(outDir, schema, table);
+            new JsonWriter().write(m, tableDir.resolve("metadata.json"));
+            if (tsv) new TsvWriter().writeAll(m, tableDir);
             return ErrorCodes.OK.exitCode();
         } catch (DataBridgeException e) {
             emitError(e);
@@ -70,5 +71,10 @@ public final class ExtractCommand implements Callable<Integer> {
     private static String jsonEscape(String s) {
         if (s == null) return "";
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+    }
+
+    static Path targetDir(Path outDir, String schema, String table) {
+        String name = (schema == null || schema.isBlank()) ? table : schema + "." + table;
+        return outDir.resolve(name);
     }
 }

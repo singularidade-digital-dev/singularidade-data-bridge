@@ -33,7 +33,8 @@ class ExtractCommandIT {
                 );
             assertThat(exit).isZero();
 
-            Path metadata = tmp.resolve("metadata.json");
+            Path tableDir = tmp.resolve("atl.cliente");
+            Path metadata = tableDir.resolve("metadata.json");
             assertThat(metadata).exists();
 
             ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
@@ -50,8 +51,8 @@ class ExtractCommandIT {
             assertThat(tree.get("cardinality").get("totalRows").asLong()).isEqualTo(5L);
             assertThat(tree.get("warnings").isArray()).isTrue();
 
-            assertThat(tmp.resolve("columns.tsv")).exists();
-            assertThat(tmp.resolve("sample.tsv")).exists();
+            assertThat(tableDir.resolve("columns.tsv")).exists();
+            assertThat(tableDir.resolve("sample.tsv")).exists();
         }
     }
 
@@ -70,7 +71,7 @@ class ExtractCommandIT {
             assertThat(exit).isZero();
 
             ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
-            JsonNode tree = m.readTree(Files.readString(tmp.resolve("metadata.json")));
+            JsonNode tree = m.readTree(Files.readString(tmp.resolve("atl.cliente").resolve("metadata.json")));
 
             assertThat(tree.get("sample").get("rowCount").asInt()).isZero();
             assertThat(tree.get("sample").get("rows").size()).isZero();
