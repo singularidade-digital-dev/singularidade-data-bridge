@@ -8,7 +8,8 @@ import picocli.CommandLine.Command;
     name = "data-bridge",
     mixinStandardHelpOptions = true,
     versionProvider = Main.VersionProvider.class,
-    subcommands = { VersionCommand.class, ExtractCommand.class, ListTablesCommand.class, ServeCommand.class }
+    subcommands = { VersionCommand.class, ExtractCommand.class, ExtractAllCommand.class,
+                    ListTablesCommand.class, ServeCommand.class }
 )
 public final class Main implements Runnable {
 
