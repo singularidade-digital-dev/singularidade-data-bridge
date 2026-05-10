@@ -7,6 +7,6 @@ public record ExtractRequest(
     Integer sampleRows,
     Boolean skipCardinality
 ) {
-    public int sampleRowsOrDefault() { return sampleRows == null ? 5 : sampleRows; }
+    public int sampleRowsOrDefault() { return sampleRows == null ? 0 : sampleRows; }
     public boolean skipCardinalityOrDefault() { return skipCardinality != null && skipCardinality; }
 }

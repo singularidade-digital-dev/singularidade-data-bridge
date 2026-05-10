@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.cli;
 
+import digital.singularidade.databridge.BuildInfo;
 import org.junit.jupiter.api.Test;
 import picocli.CommandLine;
 
@@ -16,6 +17,6 @@ class VersionCommandTest {
         CommandLine cmd = new CommandLine(new Main()).setOut(new PrintWriter(out));
         int exit = cmd.execute("version");
         assertThat(exit).isZero();
-        assertThat(out.toString()).contains("singularidade-data-bridge").contains("0.1.0");
+        assertThat(out.toString().trim()).isEqualTo(BuildInfo.NAME + " " + BuildInfo.VERSION);
     }
 }

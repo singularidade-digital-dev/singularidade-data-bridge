@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.server;
 
+import digital.singularidade.databridge.BuildInfo;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -29,7 +30,7 @@ class HttpServerIT {
                 HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/v1/version")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
             assertThat(version.statusCode()).isEqualTo(200);
-            assertThat(version.body()).contains("singularidade-data-bridge").contains("0.1.0");
+            assertThat(version.body()).contains(BuildInfo.NAME).contains(BuildInfo.VERSION);
         }
     }
 }

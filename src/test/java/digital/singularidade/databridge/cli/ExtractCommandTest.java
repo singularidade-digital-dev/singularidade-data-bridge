@@ -20,7 +20,7 @@ class ExtractCommandTest {
         assertThat(cmd.schema).isEqualTo("atl");
         assertThat(cmd.table).isEqualTo("cliente");
         assertThat(cmd.outDir.toString()).isEqualTo("/tmp/c");
-        assertThat(cmd.sampleRows).isEqualTo(5);
+        assertThat(cmd.sampleRows).isZero();   // sample is opt-in (PII safety)
         assertThat(cmd.tsv).isFalse();
         assertThat(cmd.skipCardinality).isFalse();
     }

@@ -434,6 +434,7 @@ public final class JdbcSource implements Source {
 
     @Override
     public Sample sample(String schema, String table, int limit) {
+        if (limit <= 0) return new Sample(0, List.of());
         String fqn = quoteIdent(schema) + "." + quoteIdent(table);
         String sql = "SELECT * FROM " + fqn + " LIMIT " + limit;
         List<Map<String, Object>> rows = new ArrayList<>();

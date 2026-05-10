@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ExtractCommandIT {
 
     @Test
-    void extracts_cliente_end_to_end(@TempDir Path tmp) throws Exception {
+    void extracts_cliente_with_explicit_sample_end_to_end(@TempDir Path tmp) throws Exception {
         try (PgFixture fx = new PgFixture()) {
             int exit = new CommandLine(new Main())
                 .setErr(new PrintWriter(OutputStream.nullOutputStream()))
@@ -28,6 +28,7 @@ class ExtractCommandIT {
                     "--schema", "atl",
                     "--table", "cliente",
                     "--out", tmp.toString(),
+                    "--sample-rows", "5",
                     "--tsv"
                 );
             assertThat(exit).isZero();
@@ -45,11 +46,38 @@ class ExtractCommandIT {
             assertThat(tree.get("foreignKeys").size()).isEqualTo(1);
             assertThat(tree.get("indexes").size()).isGreaterThanOrEqualTo(2);
             assertThat(tree.get("sample").get("rowCount").asInt()).isEqualTo(5);
+            assertThat(tree.get("sample").get("rows").size()).isEqualTo(5);
             assertThat(tree.get("cardinality").get("totalRows").asLong()).isEqualTo(5L);
             assertThat(tree.get("warnings").isArray()).isTrue();
 
             assertThat(tmp.resolve("columns.tsv")).exists();
             assertThat(tmp.resolve("sample.tsv")).exists();
+        }
+    }
+
+    @Test
+    void omits_sample_by_default_when_no_sample_rows_flag(@TempDir Path tmp) throws Exception {
+        try (PgFixture fx = new PgFixture()) {
+            int exit = new CommandLine(new Main())
+                .setErr(new PrintWriter(OutputStream.nullOutputStream()))
+                .execute(
+                    "extract",
+                    "--jdbc-url", fx.jdbcUrl(),
+                    "--schema", "atl",
+                    "--table", "cliente",
+                    "--out", tmp.toString()
+                );
+            assertThat(exit).isZero();
+
+            ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
+            JsonNode tree = m.readTree(Files.readString(tmp.resolve("metadata.json")));
+
+            assertThat(tree.get("sample").get("rowCount").asInt()).isZero();
+            assertThat(tree.get("sample").get("rows").size()).isZero();
+            // Other sections still populated
+            assertThat(tree.get("columns").size()).isGreaterThan(0);
+            assertThat(tree.get("primaryKey").get(0).asText()).isEqualTo("id");
+            assertThat(tree.get("cardinality").get("totalRows").asLong()).isEqualTo(5L);
         }
     }
 }

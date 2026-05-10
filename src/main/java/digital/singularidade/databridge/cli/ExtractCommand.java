@@ -23,7 +23,10 @@ public final class ExtractCommand implements Callable<Integer> {
     @Option(names = "--schema") String schema;
     @Option(names = "--table", required = true) String table;
     @Option(names = "--out", required = true) Path outDir;
-    @Option(names = "--sample-rows", defaultValue = "5") int sampleRows;
+    @Option(names = "--sample-rows", defaultValue = "0",
+            description = "Sample row count. Default 0 = no sample collected (PII-safe). "
+                        + "Pass e.g. --sample-rows 5 to include 5 real rows in metadata.json.")
+    int sampleRows;
     @Option(names = "--tsv", defaultValue = "false") boolean tsv;
     @Option(names = "--no-cardinality", defaultValue = "false") boolean skipCardinality;
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
