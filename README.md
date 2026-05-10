@@ -55,7 +55,7 @@ java -jar target/data-bridge.jar version
 | | |
 |---|---|
 | Java runtime | 21+ (Temurin recommended) |
-| Disk | ~80 MB for the fat JAR |
+| Disk | ~24 MB for the fat JAR |
 | Network | Only what your `--jdbc-url` needs |
 | Privileges | None — read-only operations only |
 
@@ -72,10 +72,21 @@ java -jar data-bridge.jar extract \
   --jdbc-url "jdbc:postgresql://host:5432/mydb?user=alice&password=s3cret&sslmode=require" \
   --schema public \
   --table customers \
-  --out /tmp/customers/
+  --out ./snapshot/
 ```
 
-Result: `/tmp/customers/metadata.json`. Add `--tsv` for companion TSV files.
+Result: `./snapshot/public.customers/metadata.json`. Add `--tsv` for companion TSV files in the same directory. Add `--sample-rows 5` if you want 5 real rows under `sample` in the JSON (off by default — see [Known limitations](#known-limitations) about PII).
+
+### Extract every table in a schema
+
+```bash
+java -jar data-bridge.jar extract-all \
+  --jdbc-url "jdbc:postgresql://host:5432/mydb?user=alice&password=s3cret" \
+  --schema public \
+  --out ./snapshot/
+```
+
+Iterates every table in the schema, writes one subdirectory per table (`./snapshot/public.<table>/metadata.json`), plus a top-level `./snapshot/_index.json` summary you can quickly diff or browse. Useful for the "schema-as-code" pattern — commit `./snapshot/` alongside your application's source so PRs surface schema drift.
 
 ### List tables in a schema
 
@@ -103,9 +114,8 @@ curl -s -X POST http://localhost:8765/v1/extract \
   -d '{
     "jdbcUrl": "jdbc:postgresql://host/mydb?user=alice&password=s3cret",
     "schema": "public",
-    "table": "customers",
-    "sampleRows": 5
-  }' | jq .
+    "table": "customers"
+  }' | jq .   # add "sampleRows": 5 in the body if you want sample data
 
 curl -s "http://localhost:8765/v1/list-tables?jdbcUrl=$(printf %s 'jdbc:postgresql://host/mydb?user=alice&password=s3cret' | jq -sRr @uri)&schema=public"
 ```
@@ -129,12 +139,64 @@ data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir
 | `--jdbc-url` | yes | — | Full JDBC URL. Driver auto-detected from the prefix. Credentials and SSL params are part of the URL. |
 | `--schema` | depends on driver | — | Required for PostgreSQL/Oracle/SQL Server. Ignored on Firebird/MySQL (single-schema). |
 | `--table` | yes | — | Table or view name. |
-| `--out` | yes | — | Output directory. Created if missing. **Always use an ephemeral path** — see the PII note below. |
-| `--sample-rows` | no | `5` | Number of sample rows to read via `SELECT * FROM <t> LIMIT N`. |
+| `--out` | yes | — | Output **parent** directory. The actual files are written under `<out>/<schema>.<table>/`. Created if missing. |
+| `--sample-rows` | no | `0` | Sample row count. **Default 0 = no sample collected.** Pass e.g. `--sample-rows 5` to include 5 real rows under `sample` in the JSON (PII-bearing — see limitations). |
 | `--tsv` | no | off | Also emit `columns.tsv`, `fks.tsv`, `indexes.tsv`, `unique-constraints.tsv`, `check-constraints.tsv`, `sample.tsv`, `cardinality.tsv`. |
 | `--no-cardinality` | no | off | Skip `COUNT(*)` and per-column `COUNT(DISTINCT)`. Use on huge tables (see [Known limitations](#known-limitations)). |
 | `-q`, `--quiet` | no | off | Suppress per-step progress on stderr. Errors still reported. |
 | `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
+
+### `extract-all` — extract every table in a schema
+
+```text
+data-bridge extract-all --jdbc-url <url> --schema <name> --out <dir>
+                        [--exclude TABLE]... [--include-views]
+                        [--sample-rows N] [--no-cardinality] [--tsv]
+                        [-q|--quiet] [-v|--verbose]
+```
+
+Iterates every table in the schema (sequentially, single connection) and runs the same pipeline as `extract` for each. Writes:
+
+```
+<out>/
+├── _index.json                       ← schema-level summary (timestamp, source, table list with row/column counts)
+├── <schema>.<table_a>/
+│   ├── metadata.json
+│   └── *.tsv (if --tsv)
+└── <schema>.<table_b>/
+    └── ...
+```
+
+| Flag | Required | Default | Purpose |
+|---|---|---|---|
+| `--jdbc-url` | yes | — | Same as `extract`. |
+| `--schema` | yes | — | Required (one schema per invocation; loop externally for multi-schema). |
+| `--out` | yes | — | Parent directory for the per-table subdirs and `_index.json`. |
+| `--exclude TABLE` | no | — | Skip a table by exact name. Repeatable: `--exclude audit_log --exclude staging`. |
+| `--include-views` | no | off | Also iterate views and materialized views (PG). Off by default = TABLE only. |
+| `--sample-rows N` | no | `0` | Same semantics as `extract`. Applies to every table. |
+| `--no-cardinality` | no | off | Same as `extract`. **Highly recommended** for whole-schema extracts of large DBs. |
+| `--tsv` | no | off | Companion TSVs in each per-table directory. |
+
+The `_index.json` shape:
+
+```json
+{
+  "$schema":     "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
+  "version":     "1.0",
+  "generatedAt": "2026-05-10T12:00:00Z",
+  "generator":   { "name": "singularidade-data-bridge", "version": "0.2.0" },
+  "source":      { "type": "jdbc", "driver": "postgresql",
+                   "url": "jdbc:postgresql://...?password=***", "schema": "public" },
+  "tableCount":  12,
+  "tables": [
+    { "schema": "public", "table": "customers", "type": "TABLE",
+      "columnCount": 9, "primaryKey": ["id"], "totalRows": 18432 }
+  ]
+}
+```
+
+CI tip: diff two `_index.json` snapshots (today vs. previous deploy) to surface row-count drift, new tables, dropped columns, etc., without parsing every per-table `metadata.json`.
 
 ### `list-tables` — list table names in a schema
 
@@ -142,7 +204,7 @@ data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir
 data-bridge list-tables --jdbc-url <url> [--schema <name>]
 ```
 
-Prints a JSON array of table names to stdout.
+Prints a JSON array of table names to stdout. Always TABLE only (no views).
 
 ### `serve` — start the HTTP daemon
 
@@ -160,7 +222,7 @@ data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.1.0
+# → singularidade-data-bridge 0.2.0
 ```
 
 ### Exit codes
@@ -198,7 +260,7 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 | Method | Path | Body / Query | Response |
 |---|---|---|---|
 | `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.1.0"}` |
+| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.2.0"}` |
 | `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
 | `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
 
@@ -209,12 +271,12 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
   "jdbcUrl": "jdbc:postgresql://host/db?user=u&password=p",
   "schema": "public",
   "table": "customers",
-  "sampleRows": 5,
+  "sampleRows": 0,
   "skipCardinality": false
 }
 ```
 
-`sampleRows` defaults to `5`, `skipCardinality` to `false`, `schema` may be omitted for single-schema drivers.
+`sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `skipCardinality` to `false`, `schema` may be omitted for single-schema drivers.
 
 ### HTTP status code mapping
 
@@ -237,7 +299,7 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
   "version":  "1.0",
   "generatedAt": "2026-05-09T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.1.0" },
+  "generator": { "name": "singularidade-data-bridge", "version": "0.2.0" },
   "source":   { "type": "jdbc", "driver": "postgresql",
                 "url": "jdbc:postgresql://...?password=***",
                 "schema": "public", "table": "customers" },
@@ -251,7 +313,7 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
   "indexes":           [ /* with method (btree/hash/...) and partial WHERE for PG */ ],
   "uniqueConstraints": [ ],
   "checkConstraints":  [ ],
-  "sample":            { "rowCount": 5,
+  "sample":            { "rowCount": 5,             /* 0 unless --sample-rows N */
                          "rows":     [ { "col1": ..., "col2": ... }, ... ] },
   "columnStats":       [ /* pg_stats; empty array on non-PG drivers */ ],
   "cardinality":       { "totalRows": 18432,
@@ -290,7 +352,7 @@ For drivers that don't expose a feature (e.g. `pg_stats` is PG-only), the corres
 
 - **Cardinality cost.** `COUNT(*)` and `COUNT(DISTINCT col)` are exact and run sequentially. On a 50 M-row table with 30 columns, a single `extract` can take tens of minutes. Use `--no-cardinality` to skip it entirely. Future work: opt-in approximation via `pg_stats.n_distinct`.
 - **No `--where` filter (yet).** Sample and cardinality reflect the entire table. The caller is responsible for scoping (e.g. point at a single-tenant database, or wait for `--where` post-MVP).
-- **Sample data is NOT redacted.** `metadata.json` may contain unmasked CPFs, names, emails, and any other PII present in the table. **Always point `--out` at an ephemeral directory (`/tmp/...`). Never commit extractions to git.** The `password` query parameter in the source URL **is** redacted (replaced with `***`) in `metadata.json`, in stderr logs, and in error messages.
+- **Sample data is opt-in and NOT redacted.** Sample collection is off by default (`--sample-rows 0`). When you opt in (`--sample-rows N`), the resulting `metadata.json` contains real database rows — including any PII present (CPFs, names, emails, etc.). For the "schema-as-code" workflow (committing `_index.json`/per-table `metadata.json` alongside source code), keep `--sample-rows 0` and the output is safe to version-control. For ad-hoc inspection (`--sample-rows 5`), point `--out` at an ephemeral directory and don't commit. The `password` query parameter in the source URL **is** redacted (replaced with `***`) in `metadata.json`, in stderr logs, and in error messages.
 - **No authentication on `serve` mode.** Bind to `localhost` only (the default), or front the daemon with a reverse proxy if you need TLS or auth.
 - **Read-only enforcement is best-effort.** The tool issues `setReadOnly(true)` on every connection and only ever runs metadata queries and `SELECT`s, but it does not run with a database role that mechanically forbids writes. If you want hard guarantees, give it a read-only DB user.
 
