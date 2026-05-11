@@ -13,14 +13,57 @@ Runs as a one-shot **CLI** for ad-hoc extraction, or as a long-running **HTTP da
 
 ## Why this exists
 
-Code-generation skills, schema-aware LLM tools, ETL planners, and migration scripts all need the same thing: a complete, structured snapshot of a relational table. Each tends to grow its own ad-hoc introspection — `psql \d`, `information_schema` queries, JDBC `DatabaseMetaData` boilerplate, vendor-specific quirks. This tool does it once, well, against a stable JSON contract, so callers can stop reinventing it.
+LLMs and code-generation agents increasingly need to **understand or query** relational databases — to plan ETL jobs, to generate MCP tools or migrations, to validate a hypothesis against real data, to draft a query before sending it for review. Today, that's normally done via per-database **MCP servers** (`mcp-server-postgres`, `mcp-server-mysql`, vendor-specific Firebird/Oracle servers, etc.). It works, but at a cost:
 
-Designed to be:
+| Pain | Why it bites |
+|---|---|
+| **Heterogeneous APIs** | Each MCP server exposes a different tool surface (`pg_execute_sql`, `query`, `list-tables`, `analyze-missing-indexes`, ...). The agent has to learn N flavors. |
+| **Heavy install** | Each server needs its own runtime (Node, Python, Go), its own dependency tree, its own process. Five DBs = five servers. |
+| **Unsafe defaults** | Many expose destructive operations as first-class tools (`pg_execute_mutation`, `truncate`, `drop-index`). One LLM hallucination away from data loss. |
+| **TLS / sandbox friction** | Connecting to remote managed databases via JS/Python tooling regularly hits chain rejection, cert pinning, sandboxed-process port restrictions. |
+| **Output drift** | Same conceptual operation ("describe this table") returns different shapes per server. Agent can't write generic post-processing. |
 
-- **Driver-uniform.** One JSON shape regardless of whether the source is PostgreSQL, Firebird, Oracle, SQL Server, or MySQL. Per-driver quirks live behind one enum.
-- **Boundary-clean.** A `Source` interface decouples extractors from JDBC. Future REST/GraphQL/file sources plug in without changing pipeline code.
-- **Hermetic.** A single fat JAR with all five JDBC drivers shaded in. No system installs, no driver hunting, no classpath surprises.
-- **Cheap to embed.** Either run the CLI per call, or start the HTTP daemon once and reuse pooled connections across hundreds of calls.
+`singularidade-data-bridge` is a **deliberately reduced** alternative aimed at the 80% of cases where the LLM only needs to **inspect or query**, not administer:
+
+- **One fat JAR** (~24 MB) with five JDBC drivers shaded in (PostgreSQL, Firebird, Oracle, SQL Server, MySQL). One install, all five backends.
+- **One JSON contract** for `extract` (per-table metadata), `extract-all` (whole-schema snapshot + summary index), and `query` (free-form SELECT with column metadata). Same shape regardless of driver.
+- **Read-only by design.** `extract` collects no sample rows by default (PII-safe). `query` rejects DML/DDL unless `--writable`, and rejects DDL outright even then.
+- **Hermetic.** No daemon required (CLI per call); optional `serve` mode if you want connection pooling for repeated calls.
+- **Stable contracts** under semver — versioned JSON schemas, documented exit codes, no surprises.
+
+It is **not** a full database admin tool. It will never manage indexes, copy data between databases, run backups, or modify schemas. For those, use the database-specific MCP server, `psql`/`sqlcmd`/`mysql`, Liquibase, Flyway, etc. The point is the **smaller surface**: one JAR, one contract, read-only-by-default.
+
+---
+
+## For LLM agents reading this
+
+If you're an AI agent deciding whether and how to use this tool:
+
+**Use `data-bridge` when:**
+- The user has a JDBC URL and you need to understand a table's schema (columns, types, FKs, indexes, constraints, statistics) — call `extract` or `extract-all`.
+- You need to test a SELECT query against the database before generating an MCP tool / ETL job / migration / report — call `query`.
+- You need a snapshot of an entire schema for diff-style comparison (CI drift detection, "schema-as-code") — call `extract-all` and commit `_index.json` + per-table folders.
+
+**Don't use `data-bridge` when:**
+- You need to modify schema (CREATE / DROP / ALTER) → use Liquibase, Flyway, or a database-specific migration tool. data-bridge will reject DDL even with `--writable`.
+- You need full DBA capabilities (manage indexes, RLS, copy between DBs, vacuum/analyze tuning) → use the DB-specific MCP server, `psql`, etc.
+- You need result streaming for large tables → data-bridge returns full result sets in one response (capped by `--limit`).
+
+**Default recipe for "understand + query" workflows:**
+1. Get a JDBC URL from the user (must include credentials inline: `jdbc:postgresql://host/db?user=u&password=p`).
+2. Discover what's there: `data-bridge list-tables --jdbc-url ... --schema X`.
+3. Get full structure for the relevant table: `data-bridge extract --jdbc-url ... --schema X --table Y --out /tmp/work/`. Read `/tmp/work/X.Y/metadata.json`.
+4. Test queries: `data-bridge query --jdbc-url ... --sql "SELECT ... LIMIT 10"`. Pipe stdout into your JSON parser.
+5. (Optional) For repeated calls, start `data-bridge serve --port 8765` once and use the HTTP API.
+
+**Safety rules already in effect — you don't have to enforce them yourself:**
+- `extract` collects **zero sample rows** unless you pass `--sample-rows N`. Default output is safe to commit alongside source.
+- `query` is **read-only** unless you pass `--writable`. SELECT/WITH/EXPLAIN/SHOW only.
+- DDL is **always rejected** (DROP, CREATE, ALTER, TRUNCATE, GRANT, REVOKE), even with `--writable`.
+- Multi-statement SQL is **always rejected** (`SELECT 1; DROP TABLE x` style injection patterns).
+- `password` in the JDBC URL is **auto-redacted** (`password=***`) in all output and error messages.
+
+**Output is stable JSON.** Every command writes JSON with documented schema (see [Output contracts](#output-contract-metadatajson)). Errors are uniform: `{"error": {"code": "...", "message": "...", "hint": "..."}}` on stderr (CLI) or response body (HTTP), with documented exit codes (CLI) and HTTP status (HTTP).
 
 ---
 
@@ -98,6 +141,16 @@ java -jar data-bridge.jar list-tables \
 
 Prints a JSON array on stdout.
 
+### Run a free-form SELECT
+
+```bash
+java -jar data-bridge.jar query \
+  --jdbc-url "jdbc:postgresql://host:5432/mydb?user=alice&password=s3cret" \
+  --sql "SELECT id, name FROM customers WHERE created_at > now() - interval '7 days' LIMIT 10"
+```
+
+Prints JSON on stdout: `{ "kind": "query", "rowCount": 10, "columns": [...], "rows": [...] }`. Defaults are read-only (SELECT/WITH/EXPLAIN/SHOW only), `--limit 100`, `--timeout-sec 30`. Pass `--writable` to permit INSERT/UPDATE/DELETE; DDL is rejected unconditionally.
+
 ### Run as an HTTP daemon
 
 ```bash
@@ -118,6 +171,14 @@ curl -s -X POST http://localhost:8765/v1/extract \
   }' | jq .   # add "sampleRows": 5 in the body if you want sample data
 
 curl -s "http://localhost:8765/v1/list-tables?jdbcUrl=$(printf %s 'jdbc:postgresql://host/mydb?user=alice&password=s3cret' | jq -sRr @uri)&schema=public"
+
+curl -s -X POST http://localhost:8765/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jdbcUrl": "jdbc:postgresql://host/mydb?user=alice&password=s3cret",
+    "sql": "SELECT id, name FROM customers LIMIT 10",
+    "limit": 100
+  }' | jq .   # add "writable": true to permit DML; DDL is rejected always
 ```
 
 The daemon keeps one HikariCP pool per normalized JDBC URL. Idle pools are evicted after `--idle-timeout` (default 10 min). The JVM shutdown hook closes everything cleanly on `SIGTERM`.
@@ -185,7 +246,7 @@ The `_index.json` shape:
   "$schema":     "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
   "version":     "1.0",
   "generatedAt": "2026-05-10T12:00:00Z",
-  "generator":   { "name": "singularidade-data-bridge", "version": "0.2.0" },
+  "generator":   { "name": "singularidade-data-bridge", "version": "0.4.0" },
   "source":      { "type": "jdbc", "driver": "postgresql",
                    "url": "jdbc:postgresql://...?password=***", "schema": "public" },
   "tableCount":  12,
@@ -197,6 +258,64 @@ The `_index.json` shape:
 ```
 
 CI tip: diff two `_index.json` snapshots (today vs. previous deploy) to surface row-count drift, new tables, dropped columns, etc., without parsing every per-table `metadata.json`.
+
+### `query` — execute one SQL statement
+
+```text
+data-bridge query --jdbc-url <url> --sql "<SQL>"
+                  [--limit 100] [--timeout-sec 30] [--writable]
+                  [--out file.json]
+                  [-q|--quiet] [-v|--verbose]
+```
+
+Defense-in-depth, in order:
+
+1. **Multi-statement input is rejected** (`SELECT 1; DROP TABLE x` style).
+2. **DDL is rejected unconditionally** (`DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`) — even with `--writable`. Use Liquibase/Flyway for schema changes.
+3. **Without `--writable`, only SELECT / WITH / EXPLAIN / SHOW** are accepted (read-only mode also flips `connection.setReadOnly(true)`, which the database driver enforces where supported).
+4. With `--writable`, **DML is allowed** (INSERT/UPDATE/DELETE) but DDL still rejected.
+5. **Recommended on top of all of the above:** point `--jdbc-url` at a database role with `GRANT SELECT` only — the only defense that actually binds against an adversary, vs. the layers above which guard against accidents.
+
+| Flag | Required | Default | Purpose |
+|---|---|---|---|
+| `--jdbc-url` | yes | — | Full JDBC URL with credentials inline. |
+| `--sql` | yes | — | The SQL to execute. Must be a single statement. |
+| `--limit` | no | `100` | Max rows returned. The driver gets `setMaxRows(limit+1)` so the result is marked `truncated=true` if more rows exist. |
+| `--timeout-sec` | no | `30` | JDBC query timeout in seconds. `0` = no timeout. |
+| `--writable` | no | off | Permit INSERT/UPDATE/DELETE. DDL still rejected. |
+| `--out` | no | stdout | Write JSON result to this file path instead of stdout. Use `-` for explicit stdout. |
+| `-q`, `--quiet` | no | off | Suppress "wrote /path" message on stderr when `--out` is used. |
+| `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
+
+Output shape (always JSON):
+
+```json
+{
+  "kind": "query",
+  "rowCount": 10,
+  "truncated": false,
+  "columns": [
+    { "name": "id",   "sqlType": "bigint",       "jdbcType": -5 },
+    { "name": "name", "sqlType": "varchar(200)", "jdbcType": 12 }
+  ],
+  "rows": [
+    { "id": 1, "name": "ALICE" }
+  ],
+  "executionTimeMs": 13,
+  "warnings": []
+}
+```
+
+For `--writable` UPDATE/INSERT/DELETE statements, the shape is:
+
+```json
+{
+  "kind": "update",
+  "updateCount": 5,
+  "executionTimeMs": 22,
+  "warnings": []
+}
+```
 
 ### `list-tables` — list table names in a schema
 
@@ -222,7 +341,7 @@ data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.2.0
+# → singularidade-data-bridge 0.4.0
 ```
 
 ### Exit codes
@@ -260,9 +379,10 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 | Method | Path | Body / Query | Response |
 |---|---|---|---|
 | `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.2.0"}` |
+| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.4.0"}` |
 | `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
 | `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
+| `POST` | `/v1/query` | body: `QueryRequest` (see below) | `200` `QueryResult` body |
 
 `ExtractRequest`:
 
@@ -277,6 +397,20 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 ```
 
 `sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `skipCardinality` to `false`, `schema` may be omitted for single-schema drivers.
+
+`QueryRequest`:
+
+```json
+{
+  "jdbcUrl": "jdbc:postgresql://host/db?user=u&password=p",
+  "sql": "SELECT id, name FROM customers LIMIT 10",
+  "limit": 100,
+  "timeoutSec": 30,
+  "writable": false
+}
+```
+
+All fields except `jdbcUrl` and `sql` are optional with the documented defaults. Same defense layers as the CLI: multi-statement / DDL rejected always; non-SELECT only when `writable=true`. The response is identical to what the CLI writes (`{kind, rowCount, columns, rows, ...}` for queries; `{kind, updateCount, ...}` for updates).
 
 ### HTTP status code mapping
 
@@ -299,7 +433,7 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
   "version":  "1.0",
   "generatedAt": "2026-05-09T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.2.0" },
+  "generator": { "name": "singularidade-data-bridge", "version": "0.4.0" },
   "source":   { "type": "jdbc", "driver": "postgresql",
                 "url": "jdbc:postgresql://...?password=***",
                 "schema": "public", "table": "customers" },
@@ -408,10 +542,10 @@ CI runs the full `mvn -B verify` on every push and pull request — see [`.githu
 Recommended:
 
 ```bash
-scripts/release.sh 0.2.0
+scripts/release.sh 0.4.0
 ```
 
-This bumps `pom.xml`, runs the full test suite, commits, tags `v0.2.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
+This bumps `pom.xml`, runs the full test suite, commits, tags `v0.4.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
 
 Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
 
