@@ -1,5 +1,6 @@
 package digital.singularidade.databridge.source.jdbc;
 
+import digital.singularidade.databridge.BuildInfo;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
 import digital.singularidade.databridge.output.Cardinality;
@@ -50,8 +51,9 @@ public final class JdbcSource implements Source {
 
     public static JdbcSource open(String jdbcUrl) {
         DriverHints hints = DriverHints.fromUrl(jdbcUrl);
+        String urlWithAppName = withApplicationName(jdbcUrl, hints);
         try {
-            Connection c = DriverManager.getConnection(jdbcUrl);
+            Connection c = DriverManager.getConnection(urlWithAppName);
             c.setReadOnly(true);
             return new JdbcSource(c, hints);
         } catch (SQLException e) {
@@ -59,6 +61,18 @@ public final class JdbcSource implements Source {
                 "Failed to connect: " + e.getMessage(),
                 "Check JDBC URL, credentials, network, and TLS settings", e);
         }
+    }
+
+    /**
+     * Set Postgres' {@code application_name} to {@code data-bridge/<version>} so the connection is
+     * easy to spot in {@code pg_stat_activity}. Skipped if the user already passed
+     * {@code ApplicationName} in the URL, or for non-PG drivers (each has a different syntax).
+     */
+    private static String withApplicationName(String jdbcUrl, DriverHints hints) {
+        if (hints != DriverHints.PG) return jdbcUrl;
+        if (jdbcUrl.toLowerCase().contains("applicationname=")) return jdbcUrl;
+        String separator = jdbcUrl.contains("?") ? "&" : "?";
+        return jdbcUrl + separator + "ApplicationName=data-bridge%2F" + BuildInfo.VERSION;
     }
 
     public static JdbcSource wrap(Connection c, DriverHints hints) {
@@ -533,14 +547,22 @@ public final class JdbcSource implements Source {
         return out;
     }
 
-    private static List<String> parseTextArray(String pgArray) {
-        if (pgArray == null || pgArray.isEmpty() || pgArray.equals("{}")) return List.of();
+    /**
+     * Parse a Postgres text array literal like {@code {"foo","bar","baz"}}. Returns empty list for
+     * anything malformed: null, length &lt; 2, missing braces. Previously this would crash with
+     * {@code StringIndexOutOfBoundsException} on length-1 strings (e.g., a single brace).
+     */
+    static List<String> parseTextArray(String pgArray) {
+        if (pgArray == null || pgArray.length() < 2
+            || !pgArray.startsWith("{") || !pgArray.endsWith("}")) {
+            return List.of();
+        }
         String inner = pgArray.substring(1, pgArray.length() - 1);
         if (inner.isEmpty()) return List.of();
         List<String> out = new ArrayList<>();
         for (String part : inner.split(",")) {
             String trimmed = part.trim();
-            if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
                 trimmed = trimmed.substring(1, trimmed.length() - 1);
             }
             out.add(trimmed);
@@ -548,8 +570,11 @@ public final class JdbcSource implements Source {
         return out;
     }
 
-    private static List<Double> parseFloatArray(String pgArray) {
-        if (pgArray == null || pgArray.isEmpty() || pgArray.equals("{}")) return List.of();
+    static List<Double> parseFloatArray(String pgArray) {
+        if (pgArray == null || pgArray.length() < 2
+            || !pgArray.startsWith("{") || !pgArray.endsWith("}")) {
+            return List.of();
+        }
         String inner = pgArray.substring(1, pgArray.length() - 1);
         if (inner.isEmpty()) return List.of();
         List<Double> out = new ArrayList<>();
