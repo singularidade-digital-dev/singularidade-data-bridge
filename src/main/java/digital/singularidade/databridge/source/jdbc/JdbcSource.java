@@ -459,7 +459,7 @@ public final class JdbcSource implements Source {
     @Override
     public Sample sample(String schema, String table, int limit) {
         if (limit <= 0) return new Sample(0, List.of());
-        String fqn = quoteIdent(schema) + "." + quoteIdent(table);
+        String fqn = fullyQualified(schema, table);
         String sql = "SELECT * FROM " + fqn + " LIMIT " + limit;
         List<Map<String, Object>> rows = new ArrayList<>();
         try (Statement st = connection.createStatement();
@@ -512,6 +512,16 @@ public final class JdbcSource implements Source {
             case MYSQL -> "`" + ident.replace("`", "``") + "`";
             case FIREBIRD -> "\"" + ident.replace("\"", "\"\"") + "\"";
         };
+    }
+
+    /**
+     * Build a fully-qualified table reference, omitting the schema entirely when null/blank.
+     * Single-schema drivers (Firebird, MySQL) typically pass schema=null — we just quote the table.
+     */
+    private String fullyQualified(String schema, String table) {
+        return (schema == null || schema.isBlank())
+            ? quoteIdent(table)
+            : quoteIdent(schema) + "." + quoteIdent(table);
     }
 
     @Override
@@ -659,7 +669,7 @@ public final class JdbcSource implements Source {
     }
 
     private Cardinality cardinalityExact(String schema, String table, List<Column> columns) {
-        String fqn = quoteIdent(schema) + "." + quoteIdent(table);
+        String fqn = fullyQualified(schema, table);
         long total;
         try (Statement st = connection.createStatement();
              ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqn)) {
@@ -693,11 +703,14 @@ public final class JdbcSource implements Source {
     }
 
     private Cardinality cardinalityApproximate(String schema, String table, List<Column> columns) {
-        if (hints != DriverHints.PG) {
-            // Other drivers don't have pg_stats; the pipeline will see totalRows=0 + empty perColumn
-            // and surface a warning explaining the fallback.
-            return new Cardinality(0L, List.of());
-        }
+        return switch (hints) {
+            case PG       -> cardinalityApproximatePg(schema, table, columns);
+            case FIREBIRD -> cardinalityApproximateFirebird(table, columns);
+            default       -> new Cardinality(0L, List.of());   // Oracle/MSSQL/MySQL: pipeline emits warning
+        };
+    }
+
+    private Cardinality cardinalityApproximatePg(String schema, String table, List<Column> columns) {
         long totalRows = 0L;
         String totalSql = """
             SELECT c.reltuples::bigint AS approx_rows
@@ -746,6 +759,93 @@ public final class JdbcSource implements Source {
                 : Math.max(0L, Math.round(n));
             long nulls = Math.max(0L, Math.round(nullFrac * totalRows));
             per.add(new Cardinality.PerColumn(c.name(), distinct, nulls));
+        }
+        return new Cardinality(totalRows, per);
+    }
+
+    /**
+     * Firebird approximate cardinality from {@code RDB$INDICES.RDB$STATISTICS}.
+     *
+     * <p>Firebird's {@code RDB$STATISTICS} on an index is {@code 1.0 / NDV} where NDV is the number
+     * of distinct values that index covers. So for a unique index (PK), {@code 1/selectivity}
+     * is the approximate row count of the table; for a single-column non-unique index,
+     * {@code 1/selectivity} is the approximate distinct count of that column.
+     *
+     * <p>Limitations:
+     * <ul>
+     *   <li>Per-column distinct estimates are only available for columns that are the SOLE segment
+     *       of a single-column index. Non-indexed columns are silently omitted (the pipeline turns
+     *       this into a per-column warning).</li>
+     *   <li>Tables without a PK index get {@code totalRows = 0}; the pipeline surfaces a warning.</li>
+     *   <li>Statistics are only as fresh as the last {@code SET STATISTICS INDEX} run.</li>
+     * </ul>
+     *
+     * <p>Firebird identifiers are stored uppercase (and trimmed by the engine), so we upper-case
+     * the table name before comparing to {@code RDB$RELATIONS.RDB$RELATION_NAME}.
+     */
+    private Cardinality cardinalityApproximateFirebird(String table, List<Column> columns) {
+        String tableUpper = table.toUpperCase();
+
+        long totalRows = 0L;
+        String totalSql = """
+            SELECT 1.0 / NULLIF(i.RDB$STATISTICS, 0) AS approx_rows
+              FROM RDB$INDICES i
+              JOIN RDB$RELATION_CONSTRAINTS rc
+                ON rc.RDB$INDEX_NAME = i.RDB$INDEX_NAME
+             WHERE TRIM(rc.RDB$RELATION_NAME) = ?
+               AND TRIM(rc.RDB$CONSTRAINT_TYPE) = 'PRIMARY KEY'
+            """;
+        try (PreparedStatement ps = connection.prepareStatement(totalSql)) {
+            ps.setString(1, tableUpper);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    double approx = rs.getDouble(1);
+                    if (!rs.wasNull() && Double.isFinite(approx)) {
+                        totalRows = Math.max(0L, Math.round(approx));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "Firebird approximate cardinality (PK index) failed: " + e.getMessage(), null, e);
+        }
+
+        // Map column-name -> approx distinct (from single-segment indexes only)
+        Map<String, Long> distinctByCol = new HashMap<>();
+        String distinctSql = """
+            SELECT TRIM(seg.RDB$FIELD_NAME) AS col_name,
+                   1.0 / NULLIF(i.RDB$STATISTICS, 0) AS approx_distinct
+              FROM RDB$INDEX_SEGMENTS seg
+              JOIN RDB$INDICES i ON i.RDB$INDEX_NAME = seg.RDB$INDEX_NAME
+             WHERE TRIM(i.RDB$RELATION_NAME) = ?
+               AND i.RDB$SEGMENT_COUNT = 1
+               AND COALESCE(i.RDB$INDEX_INACTIVE, 0) = 0
+            """;
+        try (PreparedStatement ps = connection.prepareStatement(distinctSql)) {
+            ps.setString(1, tableUpper);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("col_name");
+                    double approx = rs.getDouble("approx_distinct");
+                    if (rs.wasNull() || !Double.isFinite(approx)) continue;
+                    distinctByCol.put(name, Math.max(0L, Math.round(approx)));
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "Firebird approximate cardinality (segment indices) failed: " + e.getMessage(), null, e);
+        }
+
+        // Firebird stores identifiers UPPERCASE; columns coming from DatabaseMetaData are also
+        // typically uppercase, but normalize defensively when looking up.
+        List<Cardinality.PerColumn> per = new ArrayList<>();
+        for (Column c : columns) {
+            if (cardinalitySkippable(c.jdbcType())) continue;
+            Long distinct = distinctByCol.get(c.name());
+            if (distinct == null) distinct = distinctByCol.get(c.name().toUpperCase());
+            if (distinct == null) continue;   // column not indexed → no estimate available
+            // Firebird does not expose null fraction in RDB$ catalogs; null count not available approximately.
+            per.add(new Cardinality.PerColumn(c.name(), distinct, 0L));
         }
         return new Cardinality(totalRows, per);
     }
