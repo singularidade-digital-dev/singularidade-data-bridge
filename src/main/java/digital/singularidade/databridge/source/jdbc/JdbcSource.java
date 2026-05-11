@@ -606,8 +606,34 @@ public final class JdbcSource implements Source {
         }
         return new Partitioning(isPartitioned, strategy, key, null, List.of());
     }
+    /**
+     * JDBC types whose {@code COUNT DISTINCT} is either prohibitively expensive or impossible/meaningless.
+     * These are always omitted from the per-column cardinality result; pipeline post-processing surfaces
+     * the omissions as warnings on {@code Metadata.warnings}.
+     */
+    private static boolean cardinalitySkippable(int jdbcType) {
+        return jdbcType == Types.BLOB
+            || jdbcType == Types.CLOB
+            || jdbcType == Types.NCLOB
+            || jdbcType == Types.BINARY           // PG BYTEA, MSSQL VARBINARY, etc.
+            || jdbcType == Types.VARBINARY
+            || jdbcType == Types.LONGVARBINARY
+            || jdbcType == Types.LONGVARCHAR
+            || jdbcType == Types.LONGNVARCHAR
+            || jdbcType == Types.SQLXML;
+    }
+
     @Override
-    public Cardinality cardinality(String schema, String table, List<Column> columns) {
+    public Cardinality cardinality(String schema, String table, List<Column> columns,
+                                    digital.singularidade.databridge.source.CardinalityMode mode) {
+        return switch (mode) {
+            case SKIP        -> new Cardinality(0L, List.of());
+            case APPROXIMATE -> cardinalityApproximate(schema, table, columns);
+            case EXACT       -> cardinalityExact(schema, table, columns);
+        };
+    }
+
+    private Cardinality cardinalityExact(String schema, String table, List<Column> columns) {
         String fqn = quoteIdent(schema) + "." + quoteIdent(table);
         long total;
         try (Statement st = connection.createStatement();
@@ -621,9 +647,10 @@ public final class JdbcSource implements Source {
 
         List<Cardinality.PerColumn> per = new ArrayList<>();
         for (Column c : columns) {
+            if (cardinalitySkippable(c.jdbcType())) continue;
             String colQ = quoteIdent(c.name());
-            long dist = 0L;
-            long nullCount = 0L;
+            long dist;
+            long nullCount;
             try (Statement st = connection.createStatement();
                  ResultSet rs = st.executeQuery(
                      "SELECT COUNT(DISTINCT " + colQ + "), SUM(CASE WHEN " + colQ
@@ -638,6 +665,64 @@ public final class JdbcSource implements Source {
             per.add(new Cardinality.PerColumn(c.name(), dist, nullCount));
         }
         return new Cardinality(total, per);
+    }
+
+    private Cardinality cardinalityApproximate(String schema, String table, List<Column> columns) {
+        if (hints != DriverHints.PG) {
+            // Other drivers don't have pg_stats; the pipeline will see totalRows=0 + empty perColumn
+            // and surface a warning explaining the fallback.
+            return new Cardinality(0L, List.of());
+        }
+        long totalRows = 0L;
+        String totalSql = """
+            SELECT c.reltuples::bigint AS approx_rows
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = ? AND c.relname = ?
+            """;
+        try (PreparedStatement ps = connection.prepareStatement(totalSql)) {
+            ps.setString(1, schema); ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) totalRows = rs.getLong("approx_rows");
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "approximate cardinality (reltuples) failed: " + e.getMessage(), null, e);
+        }
+
+        Map<String, double[]> stats = new HashMap<>();
+        String statsSql = """
+            SELECT attname, n_distinct, null_frac
+              FROM pg_stats
+             WHERE schemaname = ? AND tablename = ?
+            """;
+        try (PreparedStatement ps = connection.prepareStatement(statsSql)) {
+            ps.setString(1, schema); ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    stats.put(rs.getString("attname"),
+                        new double[]{rs.getDouble("n_distinct"), rs.getDouble("null_frac")});
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "approximate cardinality (pg_stats) failed: " + e.getMessage(), null, e);
+        }
+
+        List<Cardinality.PerColumn> per = new ArrayList<>();
+        for (Column c : columns) {
+            if (cardinalitySkippable(c.jdbcType())) continue;
+            double[] s = stats.get(c.name());
+            if (s == null) continue;   // no stats yet (table never ANALYZE'd, or column added since)
+            double n = s[0];
+            double nullFrac = s[1];
+            long distinct = (n < 0)
+                ? Math.max(0L, Math.round(-n * totalRows))
+                : Math.max(0L, Math.round(n));
+            long nulls = Math.max(0L, Math.round(nullFrac * totalRows));
+            per.add(new Cardinality.PerColumn(c.name(), distinct, nulls));
+        }
+        return new Cardinality(totalRows, per);
     }
 
     // ================================================================================

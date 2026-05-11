@@ -29,7 +29,18 @@ public interface Source extends AutoCloseable {
     Sample sample(String schema, String table, int limit);
     List<ColumnStats> columnStats(String schema, String table);
     Partitioning partitioning(String schema, String table);
-    Cardinality cardinality(String schema, String table, List<Column> columns);
+    /** Equivalent to {@link #cardinality(String, String, java.util.List, CardinalityMode)} with {@code EXACT}. */
+    default Cardinality cardinality(String schema, String table, List<Column> columns) {
+        return cardinality(schema, table, columns, CardinalityMode.EXACT);
+    }
+
+    /**
+     * Compute total row count and per-column distinct/null counts. Behavior depends on {@code mode}.
+     * BLOB / CLOB / NCLOB / LONGVARBINARY / LONGVARCHAR columns are always omitted from the per-column
+     * result regardless of mode (they're either expensive or impossible to {@code COUNT DISTINCT}).
+     * Pipeline post-processing turns those omissions into warnings on the {@code Metadata.warnings} list.
+     */
+    Cardinality cardinality(String schema, String table, List<Column> columns, CardinalityMode mode);
 
     List<String> listTables(String schema);
 
