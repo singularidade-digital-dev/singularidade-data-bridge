@@ -35,9 +35,20 @@ jobs:
       - name: Smoke-check the fat JAR
         run: |
           test -f target/data-bridge.jar
+          # Version comes from build-info.properties shaded into the JAR
+          # (filtered from pom.xml at build time). Reading it back from the
+          # JAR proves three things at once: (1) shade kept the resource,
+          # (2) the resource was filtered, (3) BuildInfo loads it correctly.
+          EXPECTED_VERSION=$(unzip -p target/data-bridge.jar build-info.properties \
+                             | sed -n 's/^version=//p')
+          EXPECTED="singularidade-data-bridge ${EXPECTED_VERSION}"
           OUT=$(java -jar target/data-bridge.jar version)
-          echo "$OUT"
-          test "$OUT" = "singularidade-data-bridge 0.1.0"
+          echo "  expected: $EXPECTED"
+          echo "  got:      $OUT"
+          if [ "$OUT" != "$EXPECTED" ]; then
+              echo "::error::JAR version output mismatch"
+              exit 1
+          fi
 
       - name: Upload fat JAR as artifact
         if: success()
