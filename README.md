@@ -71,7 +71,7 @@ If you're an AI agent deciding whether and how to use this tool:
 
 ### Option A — Download the release JAR (recommended)
 
-Grab the latest fat JAR (≈ 80 MB; bundles all five JDBC drivers):
+Grab the latest fat JAR (~24 MB; bundles all five JDBC drivers):
 
 ```bash
 LATEST=$(curl -s https://api.github.com/repos/singularidade-digital-dev/singularidade-data-bridge/releases/latest | jq -r .tag_name)
@@ -203,7 +203,8 @@ data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir
 | `--out` | yes | — | Output **parent** directory. The actual files are written under `<out>/<schema>.<table>/`. Created if missing. |
 | `--sample-rows` | no | `0` | Sample row count. **Default 0 = no sample collected.** Pass e.g. `--sample-rows 5` to include 5 real rows under `sample` in the JSON (PII-bearing — see limitations). |
 | `--tsv` | no | off | Also emit `columns.tsv`, `fks.tsv`, `indexes.tsv`, `unique-constraints.tsv`, `check-constraints.tsv`, `sample.tsv`, `cardinality.tsv`. |
-| `--no-cardinality` | no | off | Skip `COUNT(*)` and per-column `COUNT(DISTINCT)`. Use on huge tables (see [Known limitations](#known-limitations)). |
+| `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: read `pg_class.reltuples` + `pg_stats` (PG only; sub-second). `skip`: emit empty cardinality. BLOB / CLOB / BYTEA columns are always omitted regardless of mode (one warning per skipped column). |
+| `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
 | `-q`, `--quiet` | no | off | Suppress per-step progress on stderr. Errors still reported. |
 | `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
 
@@ -236,7 +237,8 @@ Iterates every table in the schema (sequentially, single connection) and runs th
 | `--exclude TABLE` | no | — | Skip a table by exact name. Repeatable: `--exclude audit_log --exclude staging`. |
 | `--include-views` | no | off | Also iterate views and materialized views (PG). Off by default = TABLE only. |
 | `--sample-rows N` | no | `0` | Same semantics as `extract`. Applies to every table. |
-| `--no-cardinality` | no | off | Same as `extract`. **Highly recommended** for whole-schema extracts of large DBs. |
+| `--cardinality-mode` | no | **`approximate`** | **Different default vs `extract`** because the cost compounds across tables. `approximate` reads `pg_class.reltuples` + `pg_stats` (sub-second per table on PG). Use `exact` if you need authoritative counts; `skip` to omit cardinality entirely. |
+| `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
 | `--tsv` | no | off | Companion TSVs in each per-table directory. |
 
 The `_index.json` shape:
@@ -246,7 +248,7 @@ The `_index.json` shape:
   "$schema":     "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
   "version":     "1.0",
   "generatedAt": "2026-05-10T12:00:00Z",
-  "generator":   { "name": "singularidade-data-bridge", "version": "0.4.0" },
+  "generator":   { "name": "singularidade-data-bridge", "version": "0.5.0" },
   "source":      { "type": "jdbc", "driver": "postgresql",
                    "url": "jdbc:postgresql://...?password=***", "schema": "public" },
   "tableCount":  12,
@@ -341,7 +343,7 @@ data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.4.0
+# → singularidade-data-bridge 0.5.0
 ```
 
 ### Exit codes
@@ -379,7 +381,7 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 | Method | Path | Body / Query | Response |
 |---|---|---|---|
 | `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.4.0"}` |
+| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.5.0"}` |
 | `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
 | `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
 | `POST` | `/v1/query` | body: `QueryRequest` (see below) | `200` `QueryResult` body |
@@ -392,11 +394,12 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
   "schema": "public",
   "table": "customers",
   "sampleRows": 0,
+  "cardinalityMode": "exact",
   "skipCardinality": false
 }
 ```
 
-`sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `skipCardinality` to `false`, `schema` may be omitted for single-schema drivers.
+`sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `cardinalityMode` defaults to `"exact"` (other values: `"approximate"`, `"skip"`), `skipCardinality` is the legacy alias and wins if `true`, `schema` may be omitted for single-schema drivers.
 
 `QueryRequest`:
 
@@ -433,7 +436,7 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
   "version":  "1.0",
   "generatedAt": "2026-05-09T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.4.0" },
+  "generator": { "name": "singularidade-data-bridge", "version": "0.5.0" },
   "source":   { "type": "jdbc", "driver": "postgresql",
                 "url": "jdbc:postgresql://...?password=***",
                 "schema": "public", "table": "customers" },
@@ -484,7 +487,7 @@ For drivers that don't expose a feature (e.g. `pg_stats` is PG-only), the corres
 
 ## Known limitations
 
-- **Cardinality cost.** `COUNT(*)` and `COUNT(DISTINCT col)` are exact and run sequentially. On a 50 M-row table with 30 columns, a single `extract` can take tens of minutes. Use `--no-cardinality` to skip it entirely. Future work: opt-in approximation via `pg_stats.n_distinct`.
+- **Cardinality cost (mitigated by `--cardinality-mode`).** Exact mode runs `COUNT(*)` plus `COUNT(DISTINCT col)` per non-BLOB column, sequentially. On a 50 M-row table with 30 columns, a single `extract --cardinality-mode exact` can take tens of minutes. For PostgreSQL, prefer `--cardinality-mode approximate` (sub-second; reads `pg_class.reltuples` + `pg_stats`) — `extract-all` already defaults to it. BLOB / CLOB / BYTEA columns are always omitted from per-column cardinality regardless of mode (each emits a warning).
 - **No `--where` filter (yet).** Sample and cardinality reflect the entire table. The caller is responsible for scoping (e.g. point at a single-tenant database, or wait for `--where` post-MVP).
 - **Sample data is opt-in and NOT redacted.** Sample collection is off by default (`--sample-rows 0`). When you opt in (`--sample-rows N`), the resulting `metadata.json` contains real database rows — including any PII present (CPFs, names, emails, etc.). For the "schema-as-code" workflow (committing `_index.json`/per-table `metadata.json` alongside source code), keep `--sample-rows 0` and the output is safe to version-control. For ad-hoc inspection (`--sample-rows 5`), point `--out` at an ephemeral directory and don't commit. The `password` query parameter in the source URL **is** redacted (replaced with `***`) in `metadata.json`, in stderr logs, and in error messages.
 - **No authentication on `serve` mode.** Bind to `localhost` only (the default), or front the daemon with a reverse proxy if you need TLS or auth.
@@ -542,10 +545,10 @@ CI runs the full `mvn -B verify` on every push and pull request — see [`.githu
 Recommended:
 
 ```bash
-scripts/release.sh 0.4.0
+scripts/release.sh 0.5.0
 ```
 
-This bumps `pom.xml`, runs the full test suite, commits, tags `v0.4.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
+This bumps `pom.xml`, runs the full test suite, commits, tags `v0.5.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
 
 Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
 
