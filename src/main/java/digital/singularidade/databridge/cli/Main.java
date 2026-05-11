@@ -9,7 +9,7 @@ import picocli.CommandLine.Command;
     mixinStandardHelpOptions = true,
     versionProvider = Main.VersionProvider.class,
     subcommands = { VersionCommand.class, ExtractCommand.class, ExtractAllCommand.class,
-                    ListTablesCommand.class, ServeCommand.class }
+                    QueryCommand.class, ListTablesCommand.class, ServeCommand.class }
 )
 public final class Main implements Runnable {
 
