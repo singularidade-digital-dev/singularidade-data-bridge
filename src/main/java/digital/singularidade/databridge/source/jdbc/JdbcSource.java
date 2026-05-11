@@ -9,6 +9,7 @@ import digital.singularidade.databridge.output.ColumnStats;
 import digital.singularidade.databridge.output.ForeignKey;
 import digital.singularidade.databridge.output.Index;
 import digital.singularidade.databridge.output.Partitioning;
+import digital.singularidade.databridge.output.QueryResult;
 import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.TableInfo;
 import digital.singularidade.databridge.output.UniqueConstraint;
@@ -35,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 
 public final class JdbcSource implements Source {
 
@@ -636,6 +638,116 @@ public final class JdbcSource implements Source {
             per.add(new Cardinality.PerColumn(c.name(), dist, nullCount));
         }
         return new Cardinality(total, per);
+    }
+
+    // ================================================================================
+    //   QueryExecutor — defense-in-depth read-only by default; --writable opts in
+    //   for DML. DDL is rejected unconditionally. Multi-statement is rejected.
+    // ================================================================================
+
+    private static final Pattern MULTI_STMT_KEYWORD = Pattern.compile(
+        ";\\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|UPSERT|DROP|CREATE|ALTER|TRUNCATE|"
+        + "GRANT|REVOKE|VACUUM|ANALYZE|EXPLAIN|WITH|BEGIN|COMMIT|ROLLBACK|CALL)\\b",
+        Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern DDL_LEADING = Pattern.compile(
+        "^\\s*(DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE)\\b",
+        Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern READONLY_OK_LEADING = Pattern.compile(
+        "^\\s*(SELECT|WITH|EXPLAIN|SHOW)\\b",
+        Pattern.CASE_INSENSITIVE);
+
+    @Override
+    public QueryResult executeQuery(String sql, int limit, int timeoutSec, boolean writable) {
+        if (sql == null || sql.isBlank()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "sql is required", null);
+        }
+        if (limit <= 0) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "limit must be > 0 (got " + limit + ")",
+                "pass --limit 100 (or any positive value)");
+        }
+        // Layer 2a: reject multi-statement attempts (defense against `; DROP TABLE` injection patterns)
+        if (MULTI_STMT_KEYWORD.matcher(sql).find()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "multi-statement queries are not allowed",
+                "submit one statement per call");
+        }
+        // Layer 2b: DDL is forbidden ALWAYS, even with --writable (use Liquibase/Flyway for schema changes)
+        if (DDL_LEADING.matcher(sql).find()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "DDL is not allowed (use Liquibase/Flyway for schema changes)",
+                null);
+        }
+        // Layer 2c: when not writable, only allow SELECT-shaped statements
+        if (!writable && !READONLY_OK_LEADING.matcher(sql).find()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "non-SELECT statement requires --writable",
+                "pass --writable to allow INSERT/UPDATE/DELETE; data-bridge never permits DDL");
+        }
+
+        // Layer 1: read-only flag on the connection (Postgres etc. enforce; some drivers ignore)
+        boolean wasReadOnly = false;
+        try { wasReadOnly = connection.isReadOnly(); } catch (SQLException ignored) {}
+
+        long t0 = System.nanoTime();
+        try {
+            if (writable && wasReadOnly) connection.setReadOnly(false);
+            try (Statement st = connection.createStatement()) {
+                if (timeoutSec > 0) st.setQueryTimeout(timeoutSec);
+                // Ask for one more than the limit so we can distinguish "exactly N rows"
+                // from "more than N rows available" — the latter sets truncated=true.
+                st.setMaxRows(limit + 1);
+                boolean hasResultSet = st.execute(sql);
+                long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+                if (hasResultSet) {
+                    try (ResultSet rs = st.getResultSet()) {
+                        return collectRows(rs, limit, elapsedMs);
+                    }
+                } else {
+                    long updateCount = st.getUpdateCount();
+                    return QueryResult.update(updateCount, elapsedMs);
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "query failed: " + e.getMessage(),
+                "verify the SQL is valid for the target driver", e);
+        } finally {
+            if (writable && wasReadOnly) {
+                try { connection.setReadOnly(true); } catch (SQLException ignored) {}
+            }
+        }
+    }
+
+    private QueryResult collectRows(ResultSet rs, int limit, long elapsedMs) throws SQLException {
+        ResultSetMetaData md = rs.getMetaData();
+        int n = md.getColumnCount();
+        List<QueryResult.ColumnInfo> columns = new ArrayList<>(n);
+        for (int i = 1; i <= n; i++) {
+            int jdbcType = md.getColumnType(i);
+            String typeName = md.getColumnTypeName(i);
+            int precision = md.getPrecision(i);
+            int scale = md.getScale(i);
+            String sqlType = TypeNormalization.toSqlType(jdbcType, typeName,
+                precision > 0 ? precision : null, precision > 0 ? precision : null,
+                scale >= 0 ? scale : null);
+            columns.add(new QueryResult.ColumnInfo(md.getColumnLabel(i), sqlType, jdbcType));
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        boolean truncated = false;
+        while (rs.next()) {
+            if (rows.size() >= limit) { truncated = true; break; }
+            LinkedHashMap<String, Object> row = new LinkedHashMap<>();
+            for (int i = 1; i <= n; i++) {
+                row.put(columns.get(i - 1).name(),
+                        readColumnValue(rs, i, md.getColumnType(i)));
+            }
+            rows.add(row);
+        }
+        return QueryResult.query(rows.size(), truncated, columns, rows, elapsedMs);
     }
 
     @Override
