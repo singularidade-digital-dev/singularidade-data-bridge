@@ -3,6 +3,7 @@ package digital.singularidade.databridge.cli;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
 import digital.singularidade.databridge.error.UrlRedaction;
+import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.TsvWriter;
@@ -36,6 +37,12 @@ public final class ExtractCommand implements Callable<Integer> {
                         + "skip: emit empty cardinality.")
     String cardinalityMode;
 
+    @Option(names = "--column-stats-mode", defaultValue = "histogram-only",
+            description = "Controls columnStats payload: full keeps mostCommonValues + mostCommonFrequencies "
+                        + "(may contain PII real values); histogram-only zeros those (default — safe to commit); "
+                        + "off makes columnStats empty.")
+    String columnStatsMode;
+
     @Option(names = "--no-cardinality", defaultValue = "false",
             description = "Legacy alias for --cardinality-mode skip.")
     boolean skipCardinality;
@@ -48,7 +55,8 @@ public final class ExtractCommand implements Callable<Integer> {
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
             CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
                 : CardinalityMode.fromWireName(cardinalityMode);
-            Metadata m = new MetadataPipeline(progress, mode)
+            ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
+            Metadata m = new MetadataPipeline(progress, mode, csMode)
                 .run(src, jdbcUrl, schema, table, sampleRows);
             Path tableDir = targetDir(outDir, schema, table);
             new JsonWriter().write(m, tableDir.resolve("metadata.json"));

@@ -32,6 +32,15 @@ class MetadataPipelineIT {
             // Default cardinality mode is EXACT, but BLOB columns are auto-skipped — surfaced as a warning.
             assertThat(m.warnings())
                 .anyMatch(w -> w.contains("foto") && w.contains("bytea"));
+            // Default mode is HISTOGRAM_ONLY; MCV/MCF should be zeroed
+            assertThat(m.columnStats()).isNotEmpty();
+            m.columnStats().forEach(s -> {
+                assertThat(s.mostCommonValues()).isEmpty();
+                assertThat(s.mostCommonFrequencies()).isEmpty();
+            });
+            // Warning emitted because we stripped
+            assertThat(m.warnings())
+                .anyMatch(w -> w.contains("columnStats") && w.contains("histogram-only"));
         }
     }
 }

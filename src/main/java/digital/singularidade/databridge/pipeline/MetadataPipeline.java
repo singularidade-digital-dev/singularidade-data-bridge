@@ -6,6 +6,7 @@ import digital.singularidade.databridge.output.Cardinality;
 import digital.singularidade.databridge.output.CheckConstraint;
 import digital.singularidade.databridge.output.Column;
 import digital.singularidade.databridge.output.ColumnStats;
+import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.ForeignKey;
 import digital.singularidade.databridge.output.Index;
 import digital.singularidade.databridge.output.Metadata;
@@ -34,12 +35,15 @@ public final class MetadataPipeline {
 
     private final PrintStream progress;
     private final CardinalityMode cardinalityMode;
+    private final ColumnStatsMode columnStatsMode;
 
-    public MetadataPipeline() { this(System.err, CardinalityMode.EXACT); }
+    public MetadataPipeline() { this(System.err, CardinalityMode.EXACT, ColumnStatsMode.HISTOGRAM_ONLY); }
 
-    public MetadataPipeline(PrintStream progress, CardinalityMode cardinalityMode) {
+    public MetadataPipeline(PrintStream progress, CardinalityMode cardinalityMode,
+                             ColumnStatsMode columnStatsMode) {
         this.progress = progress;
         this.cardinalityMode = cardinalityMode;
+        this.columnStatsMode = columnStatsMode;
     }
 
     public Metadata run(Source source, String jdbcUrl, String schema, String table, int sampleRows) {
@@ -55,6 +59,13 @@ public final class MetadataPipeline {
         List<ColumnStats> stats = step(9, "column stats", () -> source.columnStats(schema, table));
         if (stats.isEmpty() && !"postgresql".equals(source.driverWireName())) {
             warnings.add("columnStats not available for driver '" + source.driverWireName() + "' in MVP");
+        }
+        List<ColumnStats> filteredStats = columnStatsMode.apply(stats);
+        if (columnStatsMode == ColumnStatsMode.HISTOGRAM_ONLY && !stats.equals(filteredStats)) {
+            warnings.add("columnStats: mostCommonValues + mostCommonFrequencies stripped "
+                       + "(--column-stats-mode=histogram-only). Pass --column-stats-mode=full to retain.");
+        } else if (columnStatsMode == ColumnStatsMode.OFF) {
+            warnings.add("columnStats: skipped (--column-stats-mode=off)");
         }
         Partitioning part = step(10, "partitioning", () -> source.partitioning(schema, table));
 
@@ -83,7 +94,7 @@ public final class MetadataPipeline {
             SCHEMA_URL, VERSION, Instant.now(),
             new Metadata.Generator(GENERATOR_NAME, GENERATOR_VERSION),
             srcInfo, tableInfo, columns, pk, fks, indexes, ucs, ccs,
-            sample, stats, card, part, warnings
+            sample, filteredStats, card, part, warnings
         );
     }
 

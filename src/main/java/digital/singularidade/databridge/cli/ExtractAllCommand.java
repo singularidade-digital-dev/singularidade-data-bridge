@@ -5,6 +5,7 @@ import digital.singularidade.databridge.BuildInfo;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
 import digital.singularidade.databridge.error.UrlRedaction;
+import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.ExtractAllIndex;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
@@ -49,6 +50,12 @@ public final class ExtractAllCommand implements Callable<Integer> {
                         + "minutes per large table). skip: emit empty cardinality.")
     String cardinalityMode;
 
+    @Option(names = "--column-stats-mode", defaultValue = "histogram-only",
+            description = "Controls columnStats payload: full keeps mostCommonValues + mostCommonFrequencies "
+                        + "(may contain PII real values); histogram-only zeros those (default — safe to commit); "
+                        + "off makes columnStats empty.")
+    String columnStatsMode;
+
     @Option(names = "--no-cardinality", defaultValue = "false",
             description = "Legacy alias for --cardinality-mode skip.")
     boolean skipCardinality;
@@ -69,6 +76,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
         CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
             : CardinalityMode.fromWireName(cardinalityMode);
+        ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
             Set<String> excludeSet = new HashSet<>(excludes);
             List<String> tables = src.listTables(schema, includeViews).stream()
@@ -84,7 +92,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 String table = tables.get(i);
                 progress.printf("== [%d/%d] %s.%s ==%n", i + 1, tables.size(), schema, table);
 
-                Metadata m = new MetadataPipeline(progress, mode)
+                Metadata m = new MetadataPipeline(progress, mode, csMode)
                     .run(src, jdbcUrl, schema, table, sampleRows);
 
                 Path tableDir = ExtractCommand.targetDir(outDir, schema, table);
