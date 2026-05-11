@@ -203,7 +203,7 @@ data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir
 | `--out` | yes | — | Output **parent** directory. The actual files are written under `<out>/<schema>.<table>/`. Created if missing. |
 | `--sample-rows` | no | `0` | Sample row count. **Default 0 = no sample collected.** Pass e.g. `--sample-rows 5` to include 5 real rows under `sample` in the JSON (PII-bearing — see limitations). |
 | `--tsv` | no | off | Also emit `columns.tsv`, `fks.tsv`, `indexes.tsv`, `unique-constraints.tsv`, `check-constraints.tsv`, `sample.tsv`, `cardinality.tsv`. |
-| `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: read `pg_class.reltuples` + `pg_stats` (PG only; sub-second). `skip`: emit empty cardinality. BLOB / CLOB / BYTEA columns are always omitted regardless of mode (one warning per skipped column). |
+| `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: read pre-computed statistics (`pg_class.reltuples`+`pg_stats` on PG; `RDB$INDICES.RDB$STATISTICS` on Firebird; sub-second on both). `skip`: emit empty cardinality. BLOB / CLOB / BYTEA columns are always omitted regardless of mode (one warning per skipped column). |
 | `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
 | `-q`, `--quiet` | no | off | Suppress per-step progress on stderr. Errors still reported. |
 | `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
@@ -248,7 +248,7 @@ The `_index.json` shape:
   "$schema":     "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
   "version":     "1.0",
   "generatedAt": "2026-05-10T12:00:00Z",
-  "generator":   { "name": "singularidade-data-bridge", "version": "0.5.0" },
+  "generator":   { "name": "singularidade-data-bridge", "version": "0.6.0" },
   "source":      { "type": "jdbc", "driver": "postgresql",
                    "url": "jdbc:postgresql://...?password=***", "schema": "public" },
   "tableCount":  12,
@@ -343,7 +343,7 @@ data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.5.0
+# → singularidade-data-bridge 0.6.0
 ```
 
 ### Exit codes
@@ -381,7 +381,7 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 | Method | Path | Body / Query | Response |
 |---|---|---|---|
 | `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.5.0"}` |
+| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.6.0"}` |
 | `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
 | `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
 | `POST` | `/v1/query` | body: `QueryRequest` (see below) | `200` `QueryResult` body |
@@ -436,7 +436,7 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
   "version":  "1.0",
   "generatedAt": "2026-05-09T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.5.0" },
+  "generator": { "name": "singularidade-data-bridge", "version": "0.6.0" },
   "source":   { "type": "jdbc", "driver": "postgresql",
                 "url": "jdbc:postgresql://...?password=***",
                 "schema": "public", "table": "customers" },
@@ -471,17 +471,29 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
 
 ## Driver matrix
 
-| Driver | URL prefix | Status in MVP | Notes |
-|---|---|---|---|
-| PostgreSQL | `jdbc:postgresql:` | ✅ Full IT coverage (Postgres Testcontainer) | `pg_stats`, `pg_partitioned_table`, `pg_indexes` augments wired in |
-| Firebird | `jdbc:firebirdsql:` | ⚠️ Driver loads; pipeline runs; no live IT yet | Jaybird 6.0.5 |
-| Oracle | `jdbc:oracle:` | ⚠️ Driver loads; pipeline runs; no live IT yet | ojdbc11 23.6 |
-| SQL Server | `jdbc:sqlserver:` | ⚠️ Driver loads; pipeline runs; no live IT yet | mssql-jdbc 12.8.1.jre11 |
-| MySQL | `jdbc:mysql:` | ⚠️ Driver loads; pipeline runs; no live IT yet | mysql-connector-j 9.1.0 |
+| Driver | URL prefix | IT coverage | `--cardinality-mode approximate` | Notes |
+|---|---|---|---|---|
+| PostgreSQL | `jdbc:postgresql:` | ✅ Full (Postgres Testcontainer) | ✅ via `pg_class.reltuples` + `pg_stats` | `pg_partitioned_table`, `pg_indexes`, `application_name` set automatically |
+| Firebird | `jdbc:firebirdsql:` | ✅ Cardinality IT (jacobalberty/firebird Testcontainer) | ✅ via `RDB$INDICES.RDB$STATISTICS` reciprocal — only **indexed** columns get per-column estimates | Jaybird 6.0.5 |
+| Oracle | `jdbc:oracle:` | ⚠️ Driver-load smoke only | ❌ falls back to skip + warning | ojdbc11 23.6 — `ALL_TAB_COL_STATISTICS` planned |
+| SQL Server | `jdbc:sqlserver:` | ⚠️ Driver-load smoke only | ❌ falls back to skip + warning | mssql-jdbc 12.8.1.jre11 — `sys.dm_db_stats_properties` planned |
+| MySQL | `jdbc:mysql:` | ⚠️ Driver-load smoke only | ❌ falls back to skip + warning | mysql-connector-j 9.1.0 — `INFORMATION_SCHEMA.STATISTICS` planned (only indexed cols) |
 
-All five drivers are shaded into the fat JAR and verified loadable via per-driver smoke tests. Live integration tests against each non-Postgres driver land as those connectors are exercised in production.
+All five drivers are shaded into the fat JAR and verified loadable via per-driver smoke tests. Live integration tests against Oracle/SQL Server/MySQL land when there's a real consumer.
 
-For drivers that don't expose a feature (e.g. `pg_stats` is PG-only), the corresponding section of `metadata.json` is empty and a `warnings` entry explains why.
+For drivers that don't expose a feature (e.g. `pg_stats` is PG-only, `RDB$STATISTICS` is Firebird-only), the corresponding section of `metadata.json` is empty and a `warnings` entry explains why.
+
+### Operator visibility (PG)
+
+When `data-bridge` opens a PostgreSQL connection, it sets `application_name=data-bridge/<version>` so you can identify and audit its sessions:
+
+```sql
+SELECT application_name, state, query_start, backend_xmin
+  FROM pg_stat_activity
+ WHERE application_name LIKE 'data-bridge%';
+```
+
+Each `extract`, `extract-all`, or `query` invocation uses **exactly one connection** for the whole run. If you see multiple, you have multiple invocations live. The CLI's connection is closed cleanly on normal exit and on most exceptions.
 
 ---
 
@@ -545,10 +557,10 @@ CI runs the full `mvn -B verify` on every push and pull request — see [`.githu
 Recommended:
 
 ```bash
-scripts/release.sh 0.5.0
+scripts/release.sh 0.6.0
 ```
 
-This bumps `pom.xml`, runs the full test suite, commits, tags `v0.5.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
+This bumps `pom.xml`, runs the full test suite, commits, tags `v0.6.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
 
 Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
 
