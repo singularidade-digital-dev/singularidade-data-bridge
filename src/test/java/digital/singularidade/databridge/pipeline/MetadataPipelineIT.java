@@ -29,7 +29,9 @@ class MetadataPipelineIT {
             assertThat(m.sample().rowCount()).isEqualTo(5);
             assertThat(m.cardinality().totalRows()).isEqualTo(5);
             assertThat(m.partitioning().isPartitioned()).isFalse();
-            assertThat(m.warnings()).isEmpty();
+            // Default cardinality mode is EXACT, but BLOB columns are auto-skipped — surfaced as a warning.
+            assertThat(m.warnings())
+                .anyMatch(w -> w.contains("foto") && w.contains("bytea"));
         }
     }
 }

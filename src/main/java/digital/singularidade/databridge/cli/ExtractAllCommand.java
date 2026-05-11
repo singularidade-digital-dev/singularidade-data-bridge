@@ -10,6 +10,7 @@ import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
+import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -41,7 +42,16 @@ public final class ExtractAllCommand implements Callable<Integer> {
     int sampleRows;
 
     @Option(names = "--tsv", defaultValue = "false") boolean tsv;
-    @Option(names = "--no-cardinality", defaultValue = "false") boolean skipCardinality;
+
+    @Option(names = "--cardinality-mode", defaultValue = "approximate",
+            description = "approximate (default for extract-all): pg_class.reltuples + pg_stats (PG only; "
+                        + "sub-second). exact: COUNT(*) + COUNT(DISTINCT col) per column (authoritative, "
+                        + "minutes per large table). skip: emit empty cardinality.")
+    String cardinalityMode;
+
+    @Option(names = "--no-cardinality", defaultValue = "false",
+            description = "Legacy alias for --cardinality-mode skip.")
+    boolean skipCardinality;
 
     @Option(names = "--include-views", defaultValue = "false",
             description = "Also extract views and materialized views (default: tables only).")
@@ -57,6 +67,8 @@ public final class ExtractAllCommand implements Callable<Integer> {
     @Override
     public Integer call() {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
+        CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
+            : CardinalityMode.fromWireName(cardinalityMode);
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
             Set<String> excludeSet = new HashSet<>(excludes);
             List<String> tables = src.listTables(schema, includeViews).stream()
@@ -72,7 +84,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 String table = tables.get(i);
                 progress.printf("== [%d/%d] %s.%s ==%n", i + 1, tables.size(), schema, table);
 
-                Metadata m = new MetadataPipeline(progress, skipCardinality)
+                Metadata m = new MetadataPipeline(progress, mode)
                     .run(src, jdbcUrl, schema, table, sampleRows);
 
                 Path tableDir = ExtractCommand.targetDir(outDir, schema, table);
@@ -82,7 +94,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 summaries.add(new ExtractAllIndex.TableSummary(
                     schema, table, m.tableInfo().type(),
                     m.columns().size(), m.primaryKey(),
-                    skipCardinality ? null : m.cardinality().totalRows()));
+                    mode == CardinalityMode.SKIP ? null : m.cardinality().totalRows()));
             }
 
             ExtractAllIndex index = new ExtractAllIndex(

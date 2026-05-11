@@ -7,6 +7,7 @@ import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
+import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -28,7 +29,16 @@ public final class ExtractCommand implements Callable<Integer> {
                         + "Pass e.g. --sample-rows 5 to include 5 real rows in metadata.json.")
     int sampleRows;
     @Option(names = "--tsv", defaultValue = "false") boolean tsv;
-    @Option(names = "--no-cardinality", defaultValue = "false") boolean skipCardinality;
+
+    @Option(names = "--cardinality-mode", defaultValue = "exact",
+            description = "exact (default): COUNT(*) + COUNT(DISTINCT col) per column — authoritative, slow. "
+                        + "approximate: read pg_class.reltuples + pg_stats (PG only; sub-second). "
+                        + "skip: emit empty cardinality.")
+    String cardinalityMode;
+
+    @Option(names = "--no-cardinality", defaultValue = "false",
+            description = "Legacy alias for --cardinality-mode skip.")
+    boolean skipCardinality;
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
     @Option(names = {"-v", "--verbose"}, defaultValue = "false") boolean verbose;
 
@@ -36,7 +46,9 @@ public final class ExtractCommand implements Callable<Integer> {
     public Integer call() {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
-            Metadata m = new MetadataPipeline(progress, skipCardinality)
+            CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
+                : CardinalityMode.fromWireName(cardinalityMode);
+            Metadata m = new MetadataPipeline(progress, mode)
                 .run(src, jdbcUrl, schema, table, sampleRows);
             Path tableDir = targetDir(outDir, schema, table);
             new JsonWriter().write(m, tableDir.resolve("metadata.json"));

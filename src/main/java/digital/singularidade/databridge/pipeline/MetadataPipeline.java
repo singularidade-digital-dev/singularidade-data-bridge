@@ -14,29 +14,32 @@ import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.SourceInfo;
 import digital.singularidade.databridge.output.TableInfo;
 import digital.singularidade.databridge.output.UniqueConstraint;
+import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.Source;
 
 import java.io.PrintStream;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 
 public final class MetadataPipeline {
 
     public static final String SCHEMA_URL = "https://singularidade.digital/data-bridge/metadata.v1.json";
     public static final String VERSION = "1.0";
-    public static final String GENERATOR_NAME = "singularidade-data-bridge";
-    public static final String GENERATOR_VERSION = "0.1.0";
+    public static final String GENERATOR_NAME = BuildInfo.NAME;
+    public static final String GENERATOR_VERSION = BuildInfo.VERSION;
 
     private final PrintStream progress;
-    private final boolean skipCardinality;
+    private final CardinalityMode cardinalityMode;
 
-    public MetadataPipeline() { this(System.err, false); }
+    public MetadataPipeline() { this(System.err, CardinalityMode.EXACT); }
 
-    public MetadataPipeline(PrintStream progress, boolean skipCardinality) {
+    public MetadataPipeline(PrintStream progress, CardinalityMode cardinalityMode) {
         this.progress = progress;
-        this.skipCardinality = skipCardinality;
+        this.cardinalityMode = cardinalityMode;
     }
 
     public Metadata run(Source source, String jdbcUrl, String schema, String table, int sampleRows) {
@@ -55,12 +58,22 @@ public final class MetadataPipeline {
         }
         Partitioning part = step(10, "partitioning", () -> source.partitioning(schema, table));
 
-        Cardinality card;
-        if (skipCardinality) {
-            warnings.add("Cardinality skipped (--no-cardinality)");
-            card = new Cardinality(0L, List.of());
-        } else {
-            card = step(11, "cardinality", () -> source.cardinality(schema, table, columns));
+        Cardinality card = step(11, "cardinality (" + cardinalityMode.wireName() + ")",
+            () -> source.cardinality(schema, table, columns, cardinalityMode));
+
+        switch (cardinalityMode) {
+            case SKIP -> warnings.add("Cardinality skipped (--cardinality-mode skip)");
+            case APPROXIMATE -> {
+                if ("postgresql".equals(source.driverWireName())) {
+                    warnings.add("Cardinality is approximate (pg_class.reltuples + pg_stats.n_distinct); "
+                        + "run --cardinality-mode exact for COUNT/COUNT(DISTINCT) accuracy.");
+                } else {
+                    warnings.add("Cardinality mode 'approximate' falls back to skip on driver '"
+                        + source.driverWireName() + "' (pg_stats not available).");
+                }
+                addOmittedColumnWarnings(warnings, columns, card);
+            }
+            case EXACT -> addOmittedColumnWarnings(warnings, columns, card);
         }
 
         SourceInfo srcInfo = new SourceInfo("jdbc", source.driverWireName(),
@@ -72,6 +85,25 @@ public final class MetadataPipeline {
             srcInfo, tableInfo, columns, pk, fks, indexes, ucs, ccs,
             sample, stats, card, part, warnings
         );
+    }
+
+    /**
+     * For each column NOT present in {@code card.perColumn()}, emit one warning naming the column
+     * and its sqlType. Covers BLOB/CLOB/text types (always skipped) and, in APPROXIMATE mode on PG,
+     * columns that have no {@code pg_stats} row yet (table never ANALYZE'd, or column added since).
+     */
+    private static void addOmittedColumnWarnings(List<String> warnings,
+                                                  List<Column> columns,
+                                                  Cardinality card) {
+        Set<String> kept = new HashSet<>();
+        for (Cardinality.PerColumn pc : card.perColumn()) kept.add(pc.name());
+        for (Column c : columns) {
+            if (!kept.contains(c.name())) {
+                warnings.add("Cardinality omitted for column '" + c.name()
+                    + "' (sqlType=" + c.sqlType() + "); BLOB/text types are skipped, "
+                    + "or no pg_stats row exists yet (run ANALYZE).");
+            }
+        }
     }
 
     private <T> T step(int n, String label, Callable<T> body) {
