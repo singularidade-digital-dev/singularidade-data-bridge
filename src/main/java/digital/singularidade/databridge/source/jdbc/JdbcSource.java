@@ -37,16 +37,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class JdbcSource implements Source {
 
     private final Connection connection;
     private final DriverHints hints;
+    private final ServerVersion version;
 
-    private JdbcSource(Connection connection, DriverHints hints) {
+    private JdbcSource(Connection connection, DriverHints hints, ServerVersion version) {
         this.connection = connection;
         this.hints = hints;
+        this.version = version;
     }
 
     public static JdbcSource open(String jdbcUrl) {
@@ -55,13 +58,106 @@ public final class JdbcSource implements Source {
         try {
             Connection c = DriverManager.getConnection(urlWithAppName);
             c.setReadOnly(true);
-            return new JdbcSource(c, hints);
+            ServerVersion version = detectServerVersion(c, hints);
+            return new JdbcSource(c, hints, version);
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.CONNECTION_FAILED,
                 "Failed to connect: " + e.getMessage(),
                 "Check JDBC URL, credentials, network, and TLS settings", e);
         }
     }
+
+    private static ServerVersion detectServerVersion(Connection c, DriverHints hints) {
+        try {
+            return switch (hints) {
+                case PG       -> detectPgVersion(c);
+                case MYSQL    -> detectMySqlVersion(c);
+                case ORACLE   -> detectOracleVersion(c);
+                case FIREBIRD -> detectFirebirdVersion(c);
+                case MSSQL    -> detectMssqlVersion(c);
+            };
+        } catch (SQLException e) {
+            return ServerVersion.UNKNOWN;
+        }
+    }
+
+    private static ServerVersion detectPgVersion(Connection c) throws SQLException {
+        try (Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(
+                 "SELECT current_setting('server_version_num')::int AS num, "
+               + "       current_setting('server_version') AS banner")) {
+            if (!rs.next()) return ServerVersion.UNKNOWN;
+            int num = rs.getInt("num");      // e.g. 140010 for PG 14.10
+            return new ServerVersion("postgresql", num / 10000, num % 100, rs.getString("banner"));
+        }
+    }
+
+    private static ServerVersion detectMySqlVersion(Connection c) throws SQLException {
+        try (Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT VERSION() AS v")) {
+            if (!rs.next()) return ServerVersion.UNKNOWN;
+            String v = rs.getString("v");          // e.g. "8.0.36-mysql"
+            String[] parts = v.split("[.-]");
+            int major = parts.length > 0 ? safeInt(parts[0]) : 0;
+            int minor = parts.length > 1 ? safeInt(parts[1]) : 0;
+            return new ServerVersion("mysql", major, minor, v);
+        }
+    }
+
+    private static ServerVersion detectOracleVersion(Connection c) throws SQLException {
+        try (Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(
+                 "SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle%' FETCH FIRST 1 ROWS ONLY")) {
+            if (!rs.next()) return ServerVersion.UNKNOWN;
+            String banner = rs.getString(1);        // e.g. "Oracle Database 19c Enterprise Edition Release 19.0.0.0.0"
+            // Find first "NN.NN" in the banner
+            Matcher m = Pattern.compile("(\\d+)\\.(\\d+)").matcher(banner);
+            int major = 0, minor = 0;
+            if (m.find()) { major = safeInt(m.group(1)); minor = safeInt(m.group(2)); }
+            return new ServerVersion("oracle", major, minor, banner);
+        }
+    }
+
+    private static ServerVersion detectFirebirdVersion(Connection c) throws SQLException {
+        try (Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(
+                 "SELECT RDB$GET_CONTEXT('SYSTEM','ENGINE_VERSION') AS v FROM RDB$DATABASE")) {
+            if (!rs.next()) return ServerVersion.UNKNOWN;
+            String v = rs.getString("v");          // e.g. "4.0.4"
+            String[] parts = (v == null ? "" : v).split("\\.");
+            int major = parts.length > 0 ? safeInt(parts[0]) : 0;
+            int minor = parts.length > 1 ? safeInt(parts[1]) : 0;
+            return new ServerVersion("firebird", major, minor, v);
+        }
+    }
+
+    private static ServerVersion detectMssqlVersion(Connection c) throws SQLException {
+        try (Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT @@VERSION AS v")) {
+            if (!rs.next()) return ServerVersion.UNKNOWN;
+            String banner = rs.getString("v");
+            Matcher m = Pattern.compile("(\\d+)\\.(\\d+)").matcher(banner);
+            int major = 0, minor = 0;
+            if (m.find()) { major = safeInt(m.group(1)); minor = safeInt(m.group(2)); }
+            return new ServerVersion("mssql", major, minor, banner);
+        }
+    }
+
+    private static int safeInt(String s) {
+        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return 0; }
+    }
+
+    /** Generic feature-existence probe: does the named column exist in a system catalog table? */
+    public boolean columnExists(String catalogTable, String columnName) {
+        try (ResultSet rs = connection.getMetaData()
+                .getColumns(connection.getCatalog(), null, catalogTable, columnName)) {
+            return rs.next();
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    public ServerVersion serverVersion() { return version; }
 
     /**
      * Set Postgres' {@code application_name} to {@code data-bridge/<version>} so the connection is
@@ -77,7 +173,9 @@ public final class JdbcSource implements Source {
 
     public static JdbcSource wrap(Connection c, DriverHints hints) {
         try { c.setReadOnly(true); } catch (SQLException ignored) {}
-        return new JdbcSource(c, hints);
+        ServerVersion v;
+        try { v = detectServerVersion(c, hints); } catch (Exception e) { v = ServerVersion.UNKNOWN; }
+        return new JdbcSource(c, hints, v);
     }
 
     Connection connection() { return connection; }
