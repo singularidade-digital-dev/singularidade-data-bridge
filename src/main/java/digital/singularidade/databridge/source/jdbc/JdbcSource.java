@@ -194,7 +194,7 @@ public final class JdbcSource implements Source {
         return new JdbcSource(c, hints, v);
     }
 
-    Connection connection() { return connection; }
+    public Connection connection() { return connection; }
     DriverHints hints() { return hints; }
 
     @Override public String type() { return "jdbc"; }
