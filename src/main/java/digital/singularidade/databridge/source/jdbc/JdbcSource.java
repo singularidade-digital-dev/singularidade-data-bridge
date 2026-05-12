@@ -46,6 +46,10 @@ public final class JdbcSource implements Source {
     private final DriverHints hints;
     private final ServerVersion version;
     private final Map<String, List<String>> pkCache = new HashMap<>();
+    private final Map<String, PgClassInfo> pgClassCache = new HashMap<>();
+
+    private record PgClassInfo(String owner, Long approxRows, String viewDef,
+                                String partitionStrategy, List<String> partitionKey) {}
 
     private JdbcSource(Connection connection, DriverHints hints, ServerVersion version) {
         this.connection = connection;
@@ -501,6 +505,54 @@ public final class JdbcSource implements Source {
         return out;
     }
 
+    private PgClassInfo loadPgClassInfo(String schema, String table) {
+        String key = schema + "." + table;
+        PgClassInfo cached = pgClassCache.get(key);
+        if (cached != null) return cached;
+
+        String sql = """
+            SELECT pg_get_userbyid(c.relowner) AS owner,
+                   c.reltuples::bigint AS approx_rows,
+                   CASE WHEN c.relkind IN ('v','m')
+                        THEN pg_get_viewdef(c.oid, true) ELSE NULL END AS view_def,
+                   pt.partstrat AS partition_strategy,
+                   pg_get_partkeydef(c.oid) AS partition_key_def
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN pg_partitioned_table pt ON pt.partrelid = c.oid
+             WHERE n.nspname = ? AND c.relname = ?
+            """;
+        PgClassInfo result = null;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, schema); ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    Long approx = rs.getObject("approx_rows") == null ? null : rs.getLong("approx_rows");
+                    String partStrat = rs.getString("partition_strategy");
+                    List<String> partKey = List.of();
+                    if (partStrat != null) {
+                        String pkdef = rs.getString("partition_key_def");
+                        if (pkdef != null) {
+                            int open = pkdef.indexOf('('), close = pkdef.lastIndexOf(')');
+                            if (open >= 0 && close > open) {
+                                String inner = pkdef.substring(open + 1, close);
+                                partKey = Arrays.stream(inner.split(",")).map(String::trim).toList();
+                            }
+                        }
+                    }
+                    result = new PgClassInfo(rs.getString("owner"), approx,
+                        rs.getString("view_def"), partStrat, partKey);
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "pg_class augment failed: " + e.getMessage(), null, e);
+        }
+        if (result == null) result = new PgClassInfo(null, null, null, null, List.of());
+        pgClassCache.put(key, result);
+        return result;
+    }
+
     @Override
     public TableInfo tableInfo(String schema, String table) {
         String type = "TABLE";
@@ -528,33 +580,11 @@ public final class JdbcSource implements Source {
         }
 
         if (hints == DriverHints.PG) {
-            String sql = """
-                SELECT pg_get_userbyid(c.relowner) AS owner,
-                       c.reltuples::bigint AS approx_rows,
-                       CASE WHEN c.relkind = 'v' OR c.relkind = 'm'
-                            THEN pg_get_viewdef(c.oid, true) ELSE NULL END AS view_def,
-                       CASE WHEN c.relkind = 'p' THEN 'PARTITIONED_TABLE' ELSE NULL END AS partitioned_type
-                  FROM pg_class c
-                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                 WHERE n.nspname = ? AND c.relname = ?
-                """;
-            try (PreparedStatement ps = connection.prepareStatement(sql)) {
-                ps.setString(1, schema);
-                ps.setString(2, table);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        owner = rs.getString("owner");
-                        long ar = rs.getLong("approx_rows");
-                        if (!rs.wasNull()) approxRows = ar;
-                        viewDef = rs.getString("view_def");
-                        String pt = rs.getString("partitioned_type");
-                        if (pt != null) type = pt;
-                    }
-                }
-            } catch (SQLException e) {
-                throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
-                    "tableInfo (PG augment) failed: " + e.getMessage(), null, e);
-            }
+            PgClassInfo info = loadPgClassInfo(schema, table);
+            owner = info.owner();
+            approxRows = info.approxRows();
+            viewDef = info.viewDef();
+            if (info.partitionStrategy() != null) type = "PARTITIONED_TABLE";
         }
 
         return new TableInfo(type, comment, owner, approxRows, viewDef);
@@ -704,46 +734,15 @@ public final class JdbcSource implements Source {
         if (hints != DriverHints.PG) {
             return new Partitioning(false, null, List.of(), null, List.of());
         }
-        String checkSql = """
-            SELECT pt.partstrat, pg_get_partkeydef(c.oid) AS pkdef
-              FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-              LEFT JOIN pg_partitioned_table pt ON pt.partrelid = c.oid
-             WHERE n.nspname = ? AND c.relname = ?
-            """;
-        String strategy = null;
-        List<String> key = List.of();
-        boolean isPartitioned = false;
-        try (PreparedStatement ps = connection.prepareStatement(checkSql)) {
-            ps.setString(1, schema);
-            ps.setString(2, table);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    String s = rs.getString("partstrat");
-                    if (s != null) {
-                        isPartitioned = true;
-                        strategy = switch (s) {
-                            case "r" -> "RANGE";
-                            case "l" -> "LIST";
-                            case "h" -> "HASH";
-                            default -> s.toUpperCase();
-                        };
-                        String pkdef = rs.getString("pkdef");
-                        if (pkdef != null) {
-                            int open = pkdef.indexOf('('), close = pkdef.lastIndexOf(')');
-                            if (open >= 0 && close > open) {
-                                String inner = pkdef.substring(open + 1, close);
-                                key = Arrays.stream(inner.split(",")).map(String::trim).toList();
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (SQLException e) {
-            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
-                "partitioning failed: " + e.getMessage(), null, e);
+        PgClassInfo info = loadPgClassInfo(schema, table);
+        if (info.partitionStrategy() == null) {
+            return new Partitioning(false, null, List.of(), null, List.of());
         }
-        return new Partitioning(isPartitioned, strategy, key, null, List.of());
+        String strategy = switch (info.partitionStrategy()) {
+            case "r" -> "RANGE"; case "l" -> "LIST"; case "h" -> "HASH";
+            default -> info.partitionStrategy().toUpperCase();
+        };
+        return new Partitioning(true, strategy, info.partitionKey(), null, List.of());
     }
     /**
      * JDBC types whose {@code COUNT DISTINCT} is either prohibitively expensive or impossible/meaningless.
