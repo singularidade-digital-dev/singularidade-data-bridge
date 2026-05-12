@@ -6,7 +6,7 @@
 
     <groupId>digital.singularidade</groupId>
     <artifactId>singularidade-data-bridge</artifactId>
-    <version>0.7.0</version>
+    <version>0.7.1-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>Singularidade Data Bridge</name>
