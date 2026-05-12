@@ -45,6 +45,7 @@ public final class JdbcSource implements Source {
     private final Connection connection;
     private final DriverHints hints;
     private final ServerVersion version;
+    private final Map<String, List<String>> pkCache = new HashMap<>();
 
     private JdbcSource(Connection connection, DriverHints hints, ServerVersion version) {
         this.connection = connection;
@@ -258,6 +259,10 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<String> primaryKey(String schema, String table) {
+        String key = (schema == null ? "" : schema) + "." + table;
+        List<String> cached = pkCache.get(key);
+        if (cached != null) return cached;
+
         List<String> out = new ArrayList<>();
         try (ResultSet rs = connection.getMetaData()
                 .getPrimaryKeys(connection.getCatalog(), schema, table)) {
@@ -268,7 +273,8 @@ public final class JdbcSource implements Source {
             throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
                 "primaryKey failed: " + e.getMessage(), null, e);
         }
-        return out;
+        pkCache.put(key, List.copyOf(out));
+        return pkCache.get(key);
     }
 
     @Override
