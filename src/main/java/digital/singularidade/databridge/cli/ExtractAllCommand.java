@@ -119,7 +119,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 Instant.now(),
                 new Metadata.Generator(BuildInfo.NAME, BuildInfo.VERSION),
                 new ExtractAllIndex.SchemaSource("jdbc", src.driverWireName(),
-                    UrlRedaction.redact(jdbcUrl), schema),
+                    urlRed.apply(jdbcUrl), schema),
                 summaries.size(),
                 summaries);
             writeIndex(index, outDir.resolve("_index.json"));

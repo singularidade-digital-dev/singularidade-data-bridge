@@ -95,7 +95,11 @@ class ExtractAllCommandIT {
             assertThat(index.get("version").asText()).isEqualTo("1.0");
             assertThat(index.get("source").get("driver").asText()).isEqualTo("postgresql");
             assertThat(index.get("source").get("schema").asText()).isEqualTo("atl");
-            assertThat(index.get("source").get("url").asText()).contains("password=***");
+            // HOST_PORT default applies to _index.json too — host:port stripped, password redacted
+            String indexUrl = index.get("source").get("url").asText();
+            assertThat(indexUrl).contains("password=***");
+            assertThat(indexUrl).contains("[redacted-host]");
+            assertThat(indexUrl).doesNotContain("localhost");
             assertThat(index.get("tableCount").asInt()).isEqualTo(2);
 
             JsonNode tables = index.get("tables");
