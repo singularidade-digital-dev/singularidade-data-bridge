@@ -67,6 +67,14 @@ public final class JdbcSource implements Source {
             Connection c = DriverManager.getConnection(urlWithAppName);
             c.setReadOnly(true);
             ServerVersion version = detectServerVersion(c, hints);
+            if (hints == DriverHints.PG) {
+                try (Statement st = c.createStatement()) {
+                    st.execute("BEGIN READ ONLY");
+                } catch (SQLException ignored) {
+                    // If the server rejects BEGIN READ ONLY (very unusual), continue without it —
+                    // setReadOnly(true) above is the more important guard.
+                }
+            }
             return new JdbcSource(c, hints, version);
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.CONNECTION_FAILED,
@@ -992,7 +1000,16 @@ public final class JdbcSource implements Source {
 
         long t0 = System.nanoTime();
         try {
-            if (writable && wasReadOnly) connection.setReadOnly(false);
+            if (writable && wasReadOnly) {
+                // End any explicit read-only transaction started in open() (PG `BEGIN READ ONLY`)
+                // before flipping the read-only flag — PG rejects setReadOnly(false) mid-transaction.
+                if (hints == DriverHints.PG) {
+                    try (Statement st = connection.createStatement()) {
+                        st.execute("COMMIT");
+                    } catch (SQLException ignored) { /* no txn open or already closed */ }
+                }
+                connection.setReadOnly(false);
+            }
             try (Statement st = connection.createStatement()) {
                 if (timeoutSec > 0) st.setQueryTimeout(timeoutSec);
                 // Ask for one more than the limit so we can distinguish "exactly N rows"
