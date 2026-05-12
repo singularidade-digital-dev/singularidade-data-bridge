@@ -15,6 +15,7 @@ import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
 import digital.singularidade.databridge.pipeline.ddl.DdlBuilders;
 import digital.singularidade.databridge.source.CardinalityMode;
+import digital.singularidade.databridge.source.jdbc.DriverHints;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -32,12 +33,15 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 
 @Command(name = "extract-all",
-    description = "Extract metadata for every table in a schema. Produces one "
-                + "subdirectory per table plus a top-level _index.json summary.")
+    description = "Extract metadata for every table in a schema. --schema is required for "
+                + "PG/MySQL/Oracle/MSSQL and optional for Firebird (single-namespace DB). "
+                + "Produces one subdirectory per table plus a top-level _index.json summary.")
 public final class ExtractAllCommand implements Callable<Integer> {
 
     @Option(names = "--jdbc-url", required = true) String jdbcUrl;
-    @Option(names = "--schema", required = true) String schema;
+    @Option(names = "--schema",
+            description = "Source schema name. Required for PG/MySQL/Oracle/MSSQL. Omit for Firebird.")
+    String schema;
     @Option(names = "--out", required = true) Path outDir;
 
     @Option(names = "--sample-rows", defaultValue = "0",
@@ -98,19 +102,28 @@ public final class ExtractAllCommand implements Callable<Integer> {
         ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
         SourceUrlRedaction urlRed = SourceUrlRedaction.fromWireName(sourceUrlRedaction);
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
+            boolean schemaEmpty = (schema == null || schema.isBlank());
+            if (schemaEmpty && src.hints() != DriverHints.FIREBIRD) {
+                throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                    "--schema is required for driver '" + src.hints().wireName() + "'",
+                    "Firebird is the only single-namespace driver that can omit --schema. "
+                  + "For PG/MySQL/Oracle/MSSQL pass e.g. --schema=public.");
+            }
+            String schemaLabel = schemaEmpty ? "(no schema — Firebird)" : "schema '" + schema + "'";
             Set<String> excludeSet = new HashSet<>(excludes);
             List<String> tables = src.listTables(schema, includeViews).stream()
                 .filter(t -> !excludeSet.contains(t))
                 .toList();
-            progress.printf("Found %d table(s) in schema '%s'%s%s%n",
-                tables.size(), schema,
+            progress.printf("Found %d table(s) in %s%s%s%n",
+                tables.size(), schemaLabel,
                 includeViews ? " (incl. views)" : "",
                 excludeSet.isEmpty() ? "" : " (excluded " + excludeSet.size() + ")");
 
             List<ExtractAllIndex.TableSummary> summaries = new ArrayList<>();
             for (int i = 0; i < tables.size(); i++) {
                 String table = tables.get(i);
-                progress.printf("== [%d/%d] %s.%s ==%n", i + 1, tables.size(), schema, table);
+                String tableLabel = schemaEmpty ? table : schema + "." + table;
+                progress.printf("== [%d/%d] %s ==%n", i + 1, tables.size(), tableLabel);
 
                 Metadata m = new MetadataPipeline(progress, mode, csMode, urlRed)
                     .run(src, jdbcUrl, schema, table, sampleRows);

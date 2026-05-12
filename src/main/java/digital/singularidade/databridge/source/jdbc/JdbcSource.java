@@ -456,6 +456,7 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<UniqueConstraint> uniqueConstraints(String schema, String table) {
+        if (hints != DriverHints.PG) return List.of();
         String sql = """
             SELECT tc.constraint_name, kcu.column_name, kcu.ordinal_position
               FROM information_schema.table_constraints tc
@@ -488,6 +489,7 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<CheckConstraint> checkConstraints(String schema, String table) {
+        if (hints != DriverHints.PG) return List.of();
         String sql = """
             SELECT cc.constraint_name, cc.check_clause
               FROM information_schema.table_constraints tc
