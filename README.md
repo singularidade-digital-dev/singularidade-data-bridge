@@ -62,6 +62,9 @@ If you're an AI agent deciding whether and how to use this tool:
 - DDL is **always rejected** (DROP, CREATE, ALTER, TRUNCATE, GRANT, REVOKE), even with `--writable`.
 - Multi-statement SQL is **always rejected** (`SELECT 1; DROP TABLE x` style injection patterns).
 - `password` in the JDBC URL is **auto-redacted** (`password=***`) in all output and error messages.
+- `columnStats` defaults to **`histogram-only`** — `mostCommonValues` and `mostCommonFrequencies` (PII risk) are zeroed unless `--column-stats-mode=full` is passed.
+- `source.url` defaults to **`host-port` redaction** — production hostname is replaced with `[redacted-host]` unless `--source-url-redaction=none` is passed.
+- `extract` (CLI) writes a sibling `ddl.sql` with the table's CREATE statements in native dialect (PG/MySQL/Oracle/Firebird; MSSQL placeholder for now).
 
 **Output is stable JSON.** Every command writes JSON with documented schema (see [Output contracts](#output-contract-metadatajson)). Errors are uniform: `{"error": {"code": "...", "message": "...", "hint": "..."}}` on stderr (CLI) or response body (HTTP), with documented exit codes (CLI) and HTTP status (HTTP).
 
@@ -204,6 +207,10 @@ data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir
 | `--sample-rows` | no | `0` | Sample row count. **Default 0 = no sample collected.** Pass e.g. `--sample-rows 5` to include 5 real rows under `sample` in the JSON (PII-bearing — see limitations). |
 | `--tsv` | no | off | Also emit `columns.tsv`, `fks.tsv`, `indexes.tsv`, `unique-constraints.tsv`, `check-constraints.tsv`, `sample.tsv`, `cardinality.tsv`. |
 | `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: read pre-computed statistics (`pg_class.reltuples`+`pg_stats` on PG; `RDB$INDICES.RDB$STATISTICS` on Firebird; sub-second on both). `skip`: emit empty cardinality. BLOB / CLOB / BYTEA columns are always omitted regardless of mode (one warning per skipped column). |
+| `--column-stats-mode` | no | `histogram-only` | Controls `columnStats` payload. `full` keeps `mostCommonValues`+`mostCommonFrequencies` (PII risk). `histogram-only` (default) zeros those, keeping aggregates. `off` makes `columnStats` empty. |
+| `--source-url-redaction` | no | `host-port` | How aggressively to scrub `source.url` in metadata.json. `none` keeps host:port (legacy). `host-port` (default) replaces host[:port] with `[redacted-host]`. `full` keeps only the JDBC scheme. |
+| `--include-ddl` | no | on | Write a sibling `ddl.sql` file with reconstructed CREATE TABLE/INDEX/etc. PG/MySQL/Oracle/Firebird produce real DDL; MSSQL produces a placeholder file. |
+| `--include-triggers` | no | off | Also write `triggers.sql` alongside `ddl.sql`. Off by default (trigger extraction can inflate the snapshot). |
 | `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
 | `-q`, `--quiet` | no | off | Suppress per-step progress on stderr. Errors still reported. |
 | `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
@@ -238,6 +245,10 @@ Iterates every table in the schema (sequentially, single connection) and runs th
 | `--include-views` | no | off | Also iterate views and materialized views (PG). Off by default = TABLE only. |
 | `--sample-rows N` | no | `0` | Same semantics as `extract`. Applies to every table. |
 | `--cardinality-mode` | no | **`approximate`** | **Different default vs `extract`** because the cost compounds across tables. `approximate` reads `pg_class.reltuples` + `pg_stats` (sub-second per table on PG). Use `exact` if you need authoritative counts; `skip` to omit cardinality entirely. |
+| `--column-stats-mode` | no | `histogram-only` | Controls `columnStats` payload. `full` keeps `mostCommonValues`+`mostCommonFrequencies` (PII risk). `histogram-only` (default) zeros those, keeping aggregates. `off` makes `columnStats` empty. |
+| `--source-url-redaction` | no | `host-port` | How aggressively to scrub `source.url` in metadata.json. `none` keeps host:port (legacy). `host-port` (default) replaces host[:port] with `[redacted-host]`. `full` keeps only the JDBC scheme. |
+| `--include-ddl` | no | on | Write a sibling `ddl.sql` file with reconstructed CREATE TABLE/INDEX/etc. PG/MySQL/Oracle/Firebird produce real DDL; MSSQL produces a placeholder file. |
+| `--include-triggers` | no | off | Also write `triggers.sql` alongside `ddl.sql`. Off by default (trigger extraction can inflate the snapshot). |
 | `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
 | `--tsv` | no | off | Companion TSVs in each per-table directory. |
 
@@ -248,7 +259,7 @@ The `_index.json` shape:
   "$schema":     "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
   "version":     "1.0",
   "generatedAt": "2026-05-10T12:00:00Z",
-  "generator":   { "name": "singularidade-data-bridge", "version": "0.6.0" },
+  "generator":   { "name": "singularidade-data-bridge", "version": "0.7.0" },
   "source":      { "type": "jdbc", "driver": "postgresql",
                    "url": "jdbc:postgresql://...?password=***", "schema": "public" },
   "tableCount":  12,
@@ -343,7 +354,7 @@ data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.6.0
+# → singularidade-data-bridge 0.7.0
 ```
 
 ### Exit codes
@@ -381,7 +392,7 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 | Method | Path | Body / Query | Response |
 |---|---|---|---|
 | `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.6.0"}` |
+| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.7.0"}` |
 | `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
 | `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
 | `POST` | `/v1/query` | body: `QueryRequest` (see below) | `200` `QueryResult` body |
@@ -436,7 +447,7 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
   "version":  "1.0",
   "generatedAt": "2026-05-09T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.6.0" },
+  "generator": { "name": "singularidade-data-bridge", "version": "0.7.0" },
   "source":   { "type": "jdbc", "driver": "postgresql",
                 "url": "jdbc:postgresql://...?password=***",
                 "schema": "public", "table": "customers" },
@@ -469,15 +480,47 @@ The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularida
 
 ---
 
+## DDL output (`ddl.sql`)
+
+When `--include-ddl` is on (default), each per-table directory gets a `ddl.sql` file alongside `metadata.json`. The file contains the table definition in the **native dialect of the source database** — replay-able with the appropriate client (`psql -f`, `mysql <`, `sqlplus @`, `isql -i`).
+
+Each `ddl.sql` starts with a standard provenance header:
+
+```sql
+-- Generated by singularidade-data-bridge 0.7.0
+--   source:    jdbc:postgresql://[redacted-host]/orgen
+--   server:    PostgreSQL 14.10 on x86_64-pc-linux-gnu
+--   schema:    atl   table: cliente   driver: postgresql
+--   timestamp: 2026-05-11T15:30:00Z
+-- Included: CREATE TABLE, CREATE INDEX, FOREIGN KEY / CHECK constraints, COMMENT ON
+-- Skipped:  triggers (use --include-triggers), RLS policies, GRANT/REVOKE, functions/procedures
+```
+
+The header lists exactly what was extracted vs skipped, so consumers know whether the script is replay-complete or partial.
+
+**Driver coverage:** see Driver matrix above. PG/MySQL/Oracle/Firebird produce real DDL in v0.7.0; MSSQL produces a placeholder file (real impl deferred to v0.8.0).
+
+**Limits documented in the header per driver:**
+
+| Driver | Always included | Optional / opt-in | Never included |
+|---|---|---|---|
+| PG | columns, defaults, IDENTITY, PK/UNIQUE inline, CHECK/FK as ALTER, INDEXes, COMMENT, VIEW | triggers (`--include-triggers`), GENERATED (PG 12+) | RLS policies, GRANT/REVOKE, functions/procedures |
+| MySQL | full `SHOW CREATE TABLE` output (incl. ENGINE/CHARSET/ROW_FORMAT) | triggers | GRANT/REVOKE, functions/procedures |
+| Oracle | full `DBMS_METADATA.GET_DDL` output for TABLE/INDEX | triggers | GRANT/REVOKE, RLS/VPD policies |
+| Firebird | columns, types, defaults, IDENTITY (FB 3+), PK/UNIQUE inline, CHECK/FK as ALTER, INDEXes, COMMENT | triggers, GENERATED (FB 4+) | GRANT/REVOKE, autonomous generators |
+| MSSQL | (v0.7.0: placeholder; v0.8.0 planned) | — | — |
+
+---
+
 ## Driver matrix
 
-| Driver | URL prefix | IT coverage | `--cardinality-mode approximate` | Notes |
-|---|---|---|---|---|
-| PostgreSQL | `jdbc:postgresql:` | ✅ Full (Postgres Testcontainer) | ✅ via `pg_class.reltuples` + `pg_stats` | `pg_partitioned_table`, `pg_indexes`, `application_name` set automatically |
-| Firebird | `jdbc:firebirdsql:` | ✅ Cardinality IT (jacobalberty/firebird Testcontainer) | ✅ via `RDB$INDICES.RDB$STATISTICS` reciprocal — only **indexed** columns get per-column estimates | Jaybird 6.0.5 |
-| Oracle | `jdbc:oracle:` | ⚠️ Driver-load smoke only | ❌ falls back to skip + warning | ojdbc11 23.6 — `ALL_TAB_COL_STATISTICS` planned |
-| SQL Server | `jdbc:sqlserver:` | ⚠️ Driver-load smoke only | ❌ falls back to skip + warning | mssql-jdbc 12.8.1.jre11 — `sys.dm_db_stats_properties` planned |
-| MySQL | `jdbc:mysql:` | ⚠️ Driver-load smoke only | ❌ falls back to skip + warning | mysql-connector-j 9.1.0 — `INFORMATION_SCHEMA.STATISTICS` planned (only indexed cols) |
+| Driver | URL prefix | IT coverage | `--cardinality-mode approximate` | `--include-ddl` | Notes |
+|---|---|---|---|---|---|
+| PostgreSQL | `jdbc:postgresql:` | ✅ Full (Postgres Testcontainer) | ✅ via `pg_class.reltuples` + `pg_stats` | ✅ via `pg_get_indexdef`/`pg_get_constraintdef` + reconstruction | floor PG 11; PG 12+ for GENERATED columns |
+| Firebird | `jdbc:firebirdsql:` | ✅ Cardinality + DDL ITs (jacobalberty/firebird Testcontainer) | ✅ via `RDB$INDICES.RDB$STATISTICS` reciprocal — only **indexed** columns | ✅ via RDB$ reconstruction | floor FB 3 |
+| Oracle | `jdbc:oracle:` | ⚠️ Driver-load smoke only | ❌ planned | ✅ via `DBMS_METADATA.GET_DDL` | floor 12c |
+| SQL Server | `jdbc:sqlserver:` | ⚠️ Driver-load smoke only | ❌ planned | ⚠️ Placeholder (planned v0.8.0) | floor 2017 |
+| MySQL | `jdbc:mysql:` | ⚠️ Driver-load smoke only | ❌ planned (only indexed columns will be supported via `INFORMATION_SCHEMA.STATISTICS`) | ✅ via `SHOW CREATE TABLE` | floor 5.7 |
 
 All five drivers are shaded into the fat JAR and verified loadable via per-driver smoke tests. Live integration tests against Oracle/SQL Server/MySQL land when there's a real consumer.
 
@@ -557,10 +600,10 @@ CI runs the full `mvn -B verify` on every push and pull request — see [`.githu
 Recommended:
 
 ```bash
-scripts/release.sh 0.6.0
+scripts/release.sh 0.7.0
 ```
 
-This bumps `pom.xml`, runs the full test suite, commits, tags `v0.6.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
+This bumps `pom.xml`, runs the full test suite, commits, tags `v0.7.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
 
 Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
 
