@@ -7,8 +7,11 @@ import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.SourceUrlRedaction;
+import digital.singularidade.databridge.output.SqlFileWriter;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
+import digital.singularidade.databridge.pipeline.ddl.DdlBuilder;
+import digital.singularidade.databridge.pipeline.ddl.DdlBuilders;
 import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
@@ -53,6 +56,17 @@ public final class ExtractCommand implements Callable<Integer> {
     @Option(names = "--no-cardinality", defaultValue = "false",
             description = "Legacy alias for --cardinality-mode skip.")
     boolean skipCardinality;
+
+    @Option(names = "--include-ddl", defaultValue = "true",
+            description = "Write a sibling ddl.sql file with reconstructed CREATE TABLE/INDEX/etc. "
+                        + "Default on for PG/MySQL/Oracle/Firebird. MSSQL gets a placeholder file.")
+    boolean includeDdl;
+
+    @Option(names = "--include-triggers", defaultValue = "false",
+            description = "Also write triggers.sql alongside ddl.sql. Off by default because trigger "
+                        + "extraction can substantially inflate the snapshot.")
+    boolean includeTriggers;
+
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
     @Option(names = {"-v", "--verbose"}, defaultValue = "false") boolean verbose;
 
@@ -69,6 +83,15 @@ public final class ExtractCommand implements Callable<Integer> {
             Path tableDir = targetDir(outDir, schema, table);
             new JsonWriter().write(m, tableDir.resolve("metadata.json"));
             if (tsv) new TsvWriter().writeAll(m, tableDir);
+            if (includeDdl) {
+                DdlBuilder builder = DdlBuilders.forDriver(src.hints());
+                builder.build(src, schema, table, urlRed.apply(jdbcUrl), includeTriggers).ifPresent(script -> {
+                    new SqlFileWriter().write(script.toFileText(), tableDir.resolve("ddl.sql"));
+                    if (includeTriggers && !script.triggers().isBlank()) {
+                        new SqlFileWriter().write(script.triggersFileText(), tableDir.resolve("triggers.sql"));
+                    }
+                });
+            }
             return ErrorCodes.OK.exitCode();
         } catch (DataBridgeException e) {
             emitError(e);

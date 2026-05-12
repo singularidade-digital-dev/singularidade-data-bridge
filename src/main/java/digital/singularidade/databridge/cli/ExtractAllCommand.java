@@ -10,8 +10,10 @@ import digital.singularidade.databridge.output.ExtractAllIndex;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.SourceUrlRedaction;
+import digital.singularidade.databridge.output.SqlFileWriter;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
+import digital.singularidade.databridge.pipeline.ddl.DdlBuilders;
 import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
@@ -71,6 +73,16 @@ public final class ExtractAllCommand implements Callable<Integer> {
             description = "Also extract views and materialized views (default: tables only).")
     boolean includeViews;
 
+    @Option(names = "--include-ddl", defaultValue = "true",
+            description = "Write a sibling ddl.sql file with reconstructed CREATE TABLE/INDEX/etc. "
+                        + "Default on for PG/MySQL/Oracle/Firebird. MSSQL gets a placeholder file.")
+    boolean includeDdl;
+
+    @Option(names = "--include-triggers", defaultValue = "false",
+            description = "Also write triggers.sql alongside ddl.sql. Off by default because trigger "
+                        + "extraction can substantially inflate the snapshot.")
+    boolean includeTriggers;
+
     @Option(names = "--exclude", arity = "*",
             description = "Table name(s) to skip. Repeatable: --exclude audit_log --exclude staging.")
     List<String> excludes = new ArrayList<>();
@@ -106,6 +118,16 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 Path tableDir = ExtractCommand.targetDir(outDir, schema, table);
                 new JsonWriter().write(m, tableDir.resolve("metadata.json"));
                 if (tsv) new TsvWriter().writeAll(m, tableDir);
+                if (includeDdl) {
+                    DdlBuilders.forDriver(src.hints())
+                        .build(src, schema, table, urlRed.apply(jdbcUrl), includeTriggers)
+                        .ifPresent(script -> {
+                            new SqlFileWriter().write(script.toFileText(), tableDir.resolve("ddl.sql"));
+                            if (includeTriggers && !script.triggers().isBlank()) {
+                                new SqlFileWriter().write(script.triggersFileText(), tableDir.resolve("triggers.sql"));
+                            }
+                        });
+                }
 
                 summaries.add(new ExtractAllIndex.TableSummary(
                     schema, table, m.tableInfo().type(),
