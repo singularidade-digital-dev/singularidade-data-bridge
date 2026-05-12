@@ -16,19 +16,20 @@ class JdbcSourcePkCacheIT {
             // First call — full DB roundtrip
             long t0 = System.nanoTime();
             List<String> first = src.primaryKey("atl", "cliente");
-            long firstMs = (System.nanoTime() - t0) / 1_000_000;
+            long firstNs = System.nanoTime() - t0;
             assertThat(first).containsExactly("id");
 
-            // Subsequent calls — should be served from cache, sub-millisecond each
+            // Subsequent calls — should be served from cache, sub-microsecond each
+            int iterations = 100;
             long t1 = System.nanoTime();
-            for (int i = 0; i < 100; i++) {
+            for (int i = 0; i < iterations; i++) {
                 List<String> cached = src.primaryKey("atl", "cliente");
                 assertThat(cached).containsExactly("id");
             }
-            long cachedTotalMs = (System.nanoTime() - t1) / 1_000_000;
+            long cachedAvgNs = (System.nanoTime() - t1) / iterations;
 
-            // 100 cached calls should be << 1 single uncached call. Allow huge margin.
-            assertThat(cachedTotalMs).isLessThan(firstMs);
+            // Each cached call should be << 1 uncached call. Allow huge margin.
+            assertThat(cachedAvgNs).isLessThan(firstNs);
         }
     }
 
