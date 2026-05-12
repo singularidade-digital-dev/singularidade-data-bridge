@@ -18,7 +18,9 @@ class MetadataPipelineIT {
 
             assertThat(m.version()).isEqualTo("1.0");
             assertThat(m.source().table()).isEqualTo("cliente");
-            assertThat(m.source().url()).contains("password=***");
+            // Default redaction is HOST_PORT — host:port replaced
+            assertThat(m.source().url()).contains("password=***").contains("[redacted-host]");
+            assertThat(m.source().url()).doesNotContain("localhost");
             assertThat(m.tableInfo().type()).isEqualTo("TABLE");
             assertThat(m.columns()).extracting(c -> c.name()).contains("id", "cpf", "nome");
             assertThat(m.primaryKey()).containsExactly("id");

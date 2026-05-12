@@ -1,6 +1,7 @@
 package digital.singularidade.databridge.server;
 
 import digital.singularidade.databridge.output.ColumnStatsMode;
+import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.source.CardinalityMode;
 
 public record ExtractRequest(
@@ -10,7 +11,8 @@ public record ExtractRequest(
     Integer sampleRows,
     Boolean skipCardinality,
     String cardinalityMode,
-    String columnStatsMode
+    String columnStatsMode,
+    String sourceUrlRedaction
 ) {
     public int sampleRowsOrDefault() { return sampleRows == null ? 0 : sampleRows; }
 
@@ -27,5 +29,9 @@ public record ExtractRequest(
 
     public ColumnStatsMode resolvedColumnStatsMode() {
         return ColumnStatsMode.fromWireName(columnStatsMode);
+    }
+
+    public SourceUrlRedaction resolvedSourceUrlRedaction() {
+        return SourceUrlRedaction.fromWireName(sourceUrlRedaction);
     }
 }

@@ -6,6 +6,7 @@ import digital.singularidade.databridge.error.UrlRedaction;
 import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
+import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
 import digital.singularidade.databridge.source.CardinalityMode;
@@ -43,6 +44,12 @@ public final class ExtractCommand implements Callable<Integer> {
                         + "off makes columnStats empty.")
     String columnStatsMode;
 
+    @Option(names = "--source-url-redaction", defaultValue = "host-port",
+            description = "Controls source.url scrubbing in metadata.json: none keeps host:port "
+                        + "(only password redacted); host-port replaces host:port with [redacted-host] "
+                        + "(default — safe-by-default); full replaces everything after the JDBC scheme.")
+    String sourceUrlRedaction;
+
     @Option(names = "--no-cardinality", defaultValue = "false",
             description = "Legacy alias for --cardinality-mode skip.")
     boolean skipCardinality;
@@ -56,7 +63,8 @@ public final class ExtractCommand implements Callable<Integer> {
             CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
                 : CardinalityMode.fromWireName(cardinalityMode);
             ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
-            Metadata m = new MetadataPipeline(progress, mode, csMode)
+            SourceUrlRedaction urlRed = SourceUrlRedaction.fromWireName(sourceUrlRedaction);
+            Metadata m = new MetadataPipeline(progress, mode, csMode, urlRed)
                 .run(src, jdbcUrl, schema, table, sampleRows);
             Path tableDir = targetDir(outDir, schema, table);
             new JsonWriter().write(m, tableDir.resolve("metadata.json"));

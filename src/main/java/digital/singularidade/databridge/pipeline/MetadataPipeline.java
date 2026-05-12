@@ -1,7 +1,6 @@
 package digital.singularidade.databridge.pipeline;
 
 import digital.singularidade.databridge.BuildInfo;
-import digital.singularidade.databridge.error.UrlRedaction;
 import digital.singularidade.databridge.output.Cardinality;
 import digital.singularidade.databridge.output.CheckConstraint;
 import digital.singularidade.databridge.output.Column;
@@ -13,6 +12,7 @@ import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.Partitioning;
 import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.SourceInfo;
+import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.TableInfo;
 import digital.singularidade.databridge.output.UniqueConstraint;
 import digital.singularidade.databridge.source.CardinalityMode;
@@ -36,14 +36,19 @@ public final class MetadataPipeline {
     private final PrintStream progress;
     private final CardinalityMode cardinalityMode;
     private final ColumnStatsMode columnStatsMode;
+    private final SourceUrlRedaction urlRedaction;
 
-    public MetadataPipeline() { this(System.err, CardinalityMode.EXACT, ColumnStatsMode.HISTOGRAM_ONLY); }
+    public MetadataPipeline() {
+        this(System.err, CardinalityMode.EXACT, ColumnStatsMode.HISTOGRAM_ONLY,
+             SourceUrlRedaction.HOST_PORT);
+    }
 
     public MetadataPipeline(PrintStream progress, CardinalityMode cardinalityMode,
-                             ColumnStatsMode columnStatsMode) {
+                             ColumnStatsMode columnStatsMode, SourceUrlRedaction urlRedaction) {
         this.progress = progress;
         this.cardinalityMode = cardinalityMode;
         this.columnStatsMode = columnStatsMode;
+        this.urlRedaction = urlRedaction;
     }
 
     public Metadata run(Source source, String jdbcUrl, String schema, String table, int sampleRows) {
@@ -88,7 +93,7 @@ public final class MetadataPipeline {
         }
 
         SourceInfo srcInfo = new SourceInfo("jdbc", source.driverWireName(),
-            UrlRedaction.redact(jdbcUrl), schema, table);
+            urlRedaction.apply(jdbcUrl), schema, table);
 
         return new Metadata(
             SCHEMA_URL, VERSION, Instant.now(),

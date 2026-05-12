@@ -48,4 +48,42 @@ class UrlRedactionTest {
     void null_input_returns_null() {
         assertThat(UrlRedaction.redact(null)).isNull();
     }
+
+    @Test
+    void redactHostPort_replaces_host_only() {
+        assertThat(UrlRedaction.redactHostPort("jdbc:postgresql://orgen-prod.aws.com:5432/orgen?user=u&password=p"))
+            .isEqualTo("jdbc:postgresql://[redacted-host]/orgen?user=u&password=p");
+    }
+
+    @Test
+    void redactHostPort_handles_no_port() {
+        assertThat(UrlRedaction.redactHostPort("jdbc:postgresql://hostname/dbname"))
+            .isEqualTo("jdbc:postgresql://[redacted-host]/dbname");
+    }
+
+    @Test
+    void redactHostPort_works_for_mysql_and_oracle_and_firebird() {
+        assertThat(UrlRedaction.redactHostPort("jdbc:mysql://h:3306/d?user=u"))
+            .isEqualTo("jdbc:mysql://[redacted-host]/d?user=u");
+        assertThat(UrlRedaction.redactHostPort("jdbc:firebirdsql://h:3050//var/lib/db.fdb"))
+            .isEqualTo("jdbc:firebirdsql://[redacted-host]//var/lib/db.fdb");
+    }
+
+    @Test
+    void redactHostPort_null_returns_null() {
+        assertThat(UrlRedaction.redactHostPort(null)).isNull();
+    }
+
+    @Test
+    void redactFull_keeps_only_driver_scheme() {
+        assertThat(UrlRedaction.redactFull("jdbc:postgresql://anything/here?with=params"))
+            .isEqualTo("jdbc:postgresql:[redacted]");
+        assertThat(UrlRedaction.redactFull("jdbc:mysql://h:3306/d"))
+            .isEqualTo("jdbc:mysql:[redacted]");
+    }
+
+    @Test
+    void redactFull_null_returns_null() {
+        assertThat(UrlRedaction.redactFull(null)).isNull();
+    }
 }

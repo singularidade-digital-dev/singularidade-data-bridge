@@ -39,7 +39,8 @@ public final class ExtractHandler implements Handler {
             try (Connection c = pools.getConnection(req.jdbcUrl());
                  JdbcSource src = JdbcSource.wrap(c, hints)) {
                 Metadata m = new MetadataPipeline(new PrintStream(OutputStream.nullOutputStream()),
-                    req.resolvedCardinalityMode(), req.resolvedColumnStatsMode())
+                    req.resolvedCardinalityMode(), req.resolvedColumnStatsMode(),
+                    req.resolvedSourceUrlRedaction())
                     .run(src, req.jdbcUrl(), req.schema(), req.table(), req.sampleRowsOrDefault());
                 ctx.json(m);
             }

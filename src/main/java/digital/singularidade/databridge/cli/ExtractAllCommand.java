@@ -9,6 +9,7 @@ import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.ExtractAllIndex;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
+import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
 import digital.singularidade.databridge.source.CardinalityMode;
@@ -56,6 +57,12 @@ public final class ExtractAllCommand implements Callable<Integer> {
                         + "off makes columnStats empty.")
     String columnStatsMode;
 
+    @Option(names = "--source-url-redaction", defaultValue = "host-port",
+            description = "Controls source.url scrubbing in metadata.json: none keeps host:port "
+                        + "(only password redacted); host-port replaces host:port with [redacted-host] "
+                        + "(default — safe-by-default); full replaces everything after the JDBC scheme.")
+    String sourceUrlRedaction;
+
     @Option(names = "--no-cardinality", defaultValue = "false",
             description = "Legacy alias for --cardinality-mode skip.")
     boolean skipCardinality;
@@ -77,6 +84,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
         CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
             : CardinalityMode.fromWireName(cardinalityMode);
         ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
+        SourceUrlRedaction urlRed = SourceUrlRedaction.fromWireName(sourceUrlRedaction);
         try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
             Set<String> excludeSet = new HashSet<>(excludes);
             List<String> tables = src.listTables(schema, includeViews).stream()
@@ -92,7 +100,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 String table = tables.get(i);
                 progress.printf("== [%d/%d] %s.%s ==%n", i + 1, tables.size(), schema, table);
 
-                Metadata m = new MetadataPipeline(progress, mode, csMode)
+                Metadata m = new MetadataPipeline(progress, mode, csMode, urlRed)
                     .run(src, jdbcUrl, schema, table, sampleRows);
 
                 Path tableDir = ExtractCommand.targetDir(outDir, schema, table);
