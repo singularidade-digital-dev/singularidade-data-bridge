@@ -47,9 +47,12 @@ public final class JdbcSource implements Source {
     private final ServerVersion version;
     private final Map<String, List<String>> pkCache = new HashMap<>();
     private final Map<String, PgClassInfo> pgClassCache = new HashMap<>();
+    private final Map<String, Map<String, PgStatsEntry>> pgStatsCache = new HashMap<>();
 
     private record PgClassInfo(String owner, Long approxRows, String viewDef,
                                 String partitionStrategy, List<String> partitionKey) {}
+
+    private record PgStatsEntry(double nDistinct, double nullFrac, String mcvText, String mcfText, double correlation) {}
 
     private JdbcSource(Connection connection, DriverHints hints, ServerVersion version) {
         this.connection = connection;
@@ -553,6 +556,38 @@ public final class JdbcSource implements Source {
         return result;
     }
 
+    private Map<String, PgStatsEntry> loadPgStats(String schema, String table) {
+        String key = schema + "." + table;
+        Map<String, PgStatsEntry> cached = pgStatsCache.get(key);
+        if (cached != null) return cached;
+
+        Map<String, PgStatsEntry> stats = new HashMap<>();
+        String sql = """
+            SELECT attname, n_distinct, null_frac,
+                   most_common_vals::text AS mcv,
+                   most_common_freqs::text AS mcf,
+                   correlation
+              FROM pg_stats
+             WHERE schemaname = ? AND tablename = ?
+            """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, schema); ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    stats.put(rs.getString("attname"), new PgStatsEntry(
+                        rs.getDouble("n_distinct"), rs.getDouble("null_frac"),
+                        rs.getString("mcv"), rs.getString("mcf"),
+                        rs.getDouble("correlation")));
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "pg_stats load failed: " + e.getMessage(), null, e);
+        }
+        pgStatsCache.put(key, stats);
+        return stats;
+    }
+
     @Override
     public TableInfo tableInfo(String schema, String table) {
         String type = "TABLE";
@@ -661,32 +696,16 @@ public final class JdbcSource implements Source {
     @Override
     public List<ColumnStats> columnStats(String schema, String table) {
         if (hints != DriverHints.PG) return List.of();
-        String sql = """
-            SELECT attname, n_distinct, null_frac,
-                   most_common_vals::text AS mcv,
-                   most_common_freqs::text AS mcf,
-                   correlation
-              FROM pg_stats
-             WHERE schemaname = ? AND tablename = ?
-            """;
+        Map<String, PgStatsEntry> stats = loadPgStats(schema, table);
         List<ColumnStats> out = new ArrayList<>();
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, schema);
-            ps.setString(2, table);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String name = rs.getString("attname");
-                    Long nDist = rs.getObject("n_distinct") == null ? null : rs.getLong("n_distinct");
-                    Double nullFrac = rs.getObject("null_frac") == null ? null : rs.getDouble("null_frac");
-                    List<String> mcv = parseTextArray(rs.getString("mcv"));
-                    List<Double> mcf = parseFloatArray(rs.getString("mcf"));
-                    Double corr = rs.getObject("correlation") == null ? null : rs.getDouble("correlation");
-                    out.add(new ColumnStats(name, nDist, nullFrac, mcv, mcf, corr));
-                }
-            }
-        } catch (SQLException e) {
-            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
-                "columnStats failed: " + e.getMessage(), null, e);
+        for (Map.Entry<String, PgStatsEntry> e : stats.entrySet()) {
+            PgStatsEntry s = e.getValue();
+            Long nDist = (s.nDistinct() == 0.0) ? null : (long) s.nDistinct();
+            Double nullFrac = s.nullFrac();
+            List<String> mcv = parseTextArray(s.mcvText());
+            List<Double> mcf = parseFloatArray(s.mcfText());
+            Double corr = s.correlation();
+            out.add(new ColumnStats(e.getKey(), nDist, nullFrac, mcv, mcf, corr));
         }
         return out;
     }
@@ -814,53 +833,19 @@ public final class JdbcSource implements Source {
     }
 
     private Cardinality cardinalityApproximatePg(String schema, String table, List<Column> columns) {
-        long totalRows = 0L;
-        String totalSql = """
-            SELECT c.reltuples::bigint AS approx_rows
-              FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = ? AND c.relname = ?
-            """;
-        try (PreparedStatement ps = connection.prepareStatement(totalSql)) {
-            ps.setString(1, schema); ps.setString(2, table);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) totalRows = rs.getLong("approx_rows");
-            }
-        } catch (SQLException e) {
-            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
-                "approximate cardinality (reltuples) failed: " + e.getMessage(), null, e);
-        }
+        PgClassInfo cls = loadPgClassInfo(schema, table);
+        long totalRows = cls.approxRows() == null ? 0L : cls.approxRows();
 
-        Map<String, double[]> stats = new HashMap<>();
-        String statsSql = """
-            SELECT attname, n_distinct, null_frac
-              FROM pg_stats
-             WHERE schemaname = ? AND tablename = ?
-            """;
-        try (PreparedStatement ps = connection.prepareStatement(statsSql)) {
-            ps.setString(1, schema); ps.setString(2, table);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    stats.put(rs.getString("attname"),
-                        new double[]{rs.getDouble("n_distinct"), rs.getDouble("null_frac")});
-                }
-            }
-        } catch (SQLException e) {
-            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
-                "approximate cardinality (pg_stats) failed: " + e.getMessage(), null, e);
-        }
-
+        Map<String, PgStatsEntry> stats = loadPgStats(schema, table);
         List<Cardinality.PerColumn> per = new ArrayList<>();
         for (Column c : columns) {
             if (cardinalitySkippable(c.jdbcType())) continue;
-            double[] s = stats.get(c.name());
+            PgStatsEntry s = stats.get(c.name());
             if (s == null) continue;   // no stats yet (table never ANALYZE'd, or column added since)
-            double n = s[0];
-            double nullFrac = s[1];
-            long distinct = (n < 0)
-                ? Math.max(0L, Math.round(-n * totalRows))
-                : Math.max(0L, Math.round(n));
-            long nulls = Math.max(0L, Math.round(nullFrac * totalRows));
+            double n = s.nDistinct();
+            long distinct = (n < 0) ? Math.max(0L, Math.round(-n * totalRows))
+                                    : Math.max(0L, Math.round(n));
+            long nulls = Math.max(0L, Math.round(s.nullFrac() * totalRows));
             per.add(new Cardinality.PerColumn(c.name(), distinct, nulls));
         }
         return new Cardinality(totalRows, per);
