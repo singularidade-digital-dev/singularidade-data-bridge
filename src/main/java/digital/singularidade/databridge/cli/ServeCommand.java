@@ -12,6 +12,10 @@ import java.util.concurrent.Callable;
 @Command(name = "serve", description = "Start HTTP daemon mode.")
 public final class ServeCommand implements Callable<Integer> {
 
+    @Option(names = "--host", defaultValue = HttpServer.DEFAULT_HOST,
+            description = "Interface to bind. Defaults to loopback; the daemon has no authentication, "
+                    + "so bind elsewhere (e.g. 0.0.0.0) only behind a firewall or an authenticating proxy.")
+    String host;
     @Option(names = "--port", defaultValue = "8765") int port;
     @Option(names = "--max-pool", defaultValue = "5") int maxPool;
     @Option(names = "--idle-timeout", defaultValue = "10m", converter = ServeCommand.DurationConverter.class)
@@ -20,12 +24,12 @@ public final class ServeCommand implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
         ConnectionPoolManager pools = new ConnectionPoolManager(maxPool, idleTimeout);
-        HttpServer server = HttpServer.start(port, pools);
+        HttpServer server = HttpServer.start(host, port, pools);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try { server.close(); } catch (Exception ignored) {}
             pools.shutdown();
         }, "data-bridge-shutdown"));
-        System.err.println("data-bridge listening on http://localhost:" + server.port());
+        System.err.println("data-bridge listening on http://" + host + ":" + server.port());
         Thread.currentThread().join();
         return 0;
     }
