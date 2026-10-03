@@ -341,11 +341,12 @@ Prints a JSON array of table names to stdout. Always TABLE only (no views).
 ### `serve` — start the HTTP daemon
 
 ```text
-data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
+data-bridge serve [--host 127.0.0.1] [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 ```
 
 | Flag | Default | Purpose |
 |---|---|---|
+| `--host` | `127.0.0.1` | Interface to bind. Loopback by default because the daemon has no authentication; use `0.0.0.0` only behind a firewall or an authenticating proxy. |
 | `--port` | `8765` | TCP port to listen on. Use `0` for an ephemeral port (printed to stderr). |
 | `--max-pool` | `5` | Max HikariCP connections per unique JDBC URL. |
 | `--idle-timeout` | `10m` | Pools idle longer than this are closed and evicted. Accepts `ms`, `s`, `m`, `h` suffixes. |
@@ -548,7 +549,7 @@ Each `extract`, `extract-all`, or `query` invocation uses **exactly one connecti
 - **Cardinality cost (mitigated by `--cardinality-mode`).** Exact mode runs `COUNT(*)` plus `COUNT(DISTINCT col)` per non-BLOB column, sequentially. On a 50 M-row table with 30 columns, a single `extract --cardinality-mode exact` can take tens of minutes. For PostgreSQL, prefer `--cardinality-mode approximate` (sub-second; reads `pg_class.reltuples` + `pg_stats`) — `extract-all` already defaults to it. BLOB / CLOB / BYTEA columns are always omitted from per-column cardinality regardless of mode (each emits a warning).
 - **No `--where` filter (yet).** Sample and cardinality reflect the entire table. The caller is responsible for scoping (e.g. point at a single-tenant database, or wait for `--where` post-MVP).
 - **Sample data is opt-in and NOT redacted.** Sample collection is off by default (`--sample-rows 0`). When you opt in (`--sample-rows N`), the resulting `metadata.json` contains real database rows — including any PII present (CPFs, names, emails, etc.). For the "schema-as-code" workflow (committing `_index.json`/per-table `metadata.json` alongside source code), keep `--sample-rows 0` and the output is safe to version-control. For ad-hoc inspection (`--sample-rows 5`), point `--out` at an ephemeral directory and don't commit. The `password` query parameter in the source URL **is** redacted (replaced with `***`) in `metadata.json`, in stderr logs, and in error messages.
-- **No authentication on `serve` mode.** The daemon listens on all interfaces (Javalin default — no bind host is configured), so restrict access at the network level (firewall / localhost-only host), or front the daemon with a reverse proxy if you need TLS or auth.
+- **No authentication on `serve` mode.** The daemon binds to loopback (`127.0.0.1`) by default. Binding to another interface (`--host 0.0.0.0`) exposes every connected database to whoever can reach the port — do it only behind a firewall, or front the daemon with a reverse proxy if you need TLS or auth.
 - **Read-only enforcement is best-effort.** The tool issues `setReadOnly(true)` on every connection and only ever runs metadata queries and `SELECT`s, but it does not run with a database role that mechanically forbids writes. If you want hard guarantees, give it a read-only DB user.
 
 ---

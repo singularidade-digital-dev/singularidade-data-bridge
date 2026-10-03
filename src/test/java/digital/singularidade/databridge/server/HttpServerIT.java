@@ -33,4 +33,20 @@ class HttpServerIT {
             assertThat(version.body()).contains(BuildInfo.NAME).contains(BuildInfo.VERSION);
         }
     }
+
+    @Test
+    void binds_to_loopback_by_default() throws Exception {
+        try (ConnectionPoolManager pools = new ConnectionPoolManager(2, Duration.ofMinutes(10));
+             HttpServer server = HttpServer.start(0, pools)) {
+            assertThat(server.host()).isEqualTo("127.0.0.1");
+        }
+    }
+
+    @Test
+    void binds_to_the_requested_host() throws Exception {
+        try (ConnectionPoolManager pools = new ConnectionPoolManager(2, Duration.ofMinutes(10));
+             HttpServer server = HttpServer.start("0.0.0.0", 0, pools)) {
+            assertThat(server.host()).isEqualTo("0.0.0.0");
+        }
+    }
 }
