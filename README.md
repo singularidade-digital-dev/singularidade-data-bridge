@@ -218,7 +218,7 @@ data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir
 ### `extract-all` — extract every table in a schema
 
 ```text
-data-bridge extract-all --jdbc-url <url> --schema <name> --out <dir>
+data-bridge extract-all --jdbc-url <url> [--schema <name>] --out <dir>
                         [--exclude TABLE]... [--include-views]
                         [--sample-rows N] [--no-cardinality] [--tsv]
                         [-q|--quiet] [-v|--verbose]
@@ -239,7 +239,7 @@ Iterates every table in the schema (sequentially, single connection) and runs th
 | Flag | Required | Default | Purpose |
 |---|---|---|---|
 | `--jdbc-url` | yes | — | Same as `extract`. |
-| `--schema` | yes | — | Required (one schema per invocation; loop externally for multi-schema). |
+| `--schema` | depends on driver | — | Required for PostgreSQL/MySQL/Oracle/SQL Server; may be omitted only on Firebird (single-namespace). One schema per invocation; loop externally for multi-schema. |
 | `--out` | yes | — | Parent directory for the per-table subdirs and `_index.json`. |
 | `--exclude TABLE` | no | — | Skip a table by exact name. Repeatable: `--exclude audit_log --exclude staging`. |
 | `--include-views` | no | off | Also iterate views and materialized views (PG). Off by default = TABLE only. |
@@ -354,7 +354,7 @@ data-bridge serve [--port 8765] [--max-pool 5] [--idle-timeout 10m]
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.7.0
+# → singularidade-data-bridge 0.7.1
 ```
 
 ### Exit codes
@@ -392,7 +392,7 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
 | Method | Path | Body / Query | Response |
 |---|---|---|---|
 | `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.7.0"}` |
+| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.7.1"}` |
 | `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
 | `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
 | `POST` | `/v1/query` | body: `QueryRequest` (see below) | `200` `QueryResult` body |
@@ -406,11 +406,13 @@ Same pipeline as the CLI; same JSON output. Ideal for repeated calls because cre
   "table": "customers",
   "sampleRows": 0,
   "cardinalityMode": "exact",
-  "skipCardinality": false
+  "skipCardinality": false,
+  "columnStatsMode": "histogram-only",
+  "sourceUrlRedaction": "host-port"
 }
 ```
 
-`sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `cardinalityMode` defaults to `"exact"` (other values: `"approximate"`, `"skip"`), `skipCardinality` is the legacy alias and wins if `true`, `schema` may be omitted for single-schema drivers.
+`sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `cardinalityMode` defaults to `"exact"` (other values: `"approximate"`, `"skip"`), `skipCardinality` is the legacy alias and wins if `true`, `columnStatsMode` defaults to `"histogram-only"` (other values: `"full"`, `"off"`), `sourceUrlRedaction` defaults to `"host-port"` (other values: `"none"`, `"full"`), `schema` may be omitted for single-schema drivers.
 
 `QueryRequest`:
 
@@ -433,7 +435,8 @@ All fields except `jdbcUrl` and `sql` are optional with the documented defaults.
 | `200` | Success |
 | `400` | Invalid request body / missing required field |
 | `404` | Table or schema not found |
-| `500` | Internal data-bridge error |
+| `500` | Internal data-bridge error / output write failed |
+| `501` | Unsupported (driver-specific feature unavailable) |
 | `502` | Connection or query failed downstream |
 
 ---
@@ -498,7 +501,7 @@ Each `ddl.sql` starts with a standard provenance header:
 
 The header lists exactly what was extracted vs skipped, so consumers know whether the script is replay-complete or partial.
 
-**Driver coverage:** see Driver matrix above. PG/MySQL/Oracle/Firebird produce real DDL in v0.7.0; MSSQL produces a placeholder file (real impl deferred to v0.8.0).
+**Driver coverage:** see [Driver matrix](#driver-matrix) below. PG/MySQL/Oracle/Firebird produce real DDL in v0.7.0; MSSQL produces a placeholder file (real impl deferred to v0.8.0).
 
 **Limits documented in the header per driver:**
 
@@ -545,7 +548,7 @@ Each `extract`, `extract-all`, or `query` invocation uses **exactly one connecti
 - **Cardinality cost (mitigated by `--cardinality-mode`).** Exact mode runs `COUNT(*)` plus `COUNT(DISTINCT col)` per non-BLOB column, sequentially. On a 50 M-row table with 30 columns, a single `extract --cardinality-mode exact` can take tens of minutes. For PostgreSQL, prefer `--cardinality-mode approximate` (sub-second; reads `pg_class.reltuples` + `pg_stats`) — `extract-all` already defaults to it. BLOB / CLOB / BYTEA columns are always omitted from per-column cardinality regardless of mode (each emits a warning).
 - **No `--where` filter (yet).** Sample and cardinality reflect the entire table. The caller is responsible for scoping (e.g. point at a single-tenant database, or wait for `--where` post-MVP).
 - **Sample data is opt-in and NOT redacted.** Sample collection is off by default (`--sample-rows 0`). When you opt in (`--sample-rows N`), the resulting `metadata.json` contains real database rows — including any PII present (CPFs, names, emails, etc.). For the "schema-as-code" workflow (committing `_index.json`/per-table `metadata.json` alongside source code), keep `--sample-rows 0` and the output is safe to version-control. For ad-hoc inspection (`--sample-rows 5`), point `--out` at an ephemeral directory and don't commit. The `password` query parameter in the source URL **is** redacted (replaced with `***`) in `metadata.json`, in stderr logs, and in error messages.
-- **No authentication on `serve` mode.** Bind to `localhost` only (the default), or front the daemon with a reverse proxy if you need TLS or auth.
+- **No authentication on `serve` mode.** The daemon listens on all interfaces (Javalin default — no bind host is configured), so restrict access at the network level (firewall / localhost-only host), or front the daemon with a reverse proxy if you need TLS or auth.
 - **Read-only enforcement is best-effort.** The tool issues `setReadOnly(true)` on every connection and only ever runs metadata queries and `SELECT`s, but it does not run with a database role that mechanically forbids writes. If you want hard guarantees, give it a read-only DB user.
 
 ---
@@ -587,23 +590,23 @@ Full design rationale lives in [`docs/superpowers/specs/2026-05-09-singularidade
 
 ```bash
 mvn test                 # unit tests + driver-load smoke (no Docker required)
-mvn verify               # adds Postgres Testcontainer ITs (Docker required)
+mvn verify               # adds Postgres + Firebird Testcontainer ITs (Docker required)
 mvn -DskipTests package  # produces target/data-bridge.jar
 ```
 
 The build is conventional Maven. Surefire picks up `*Test.java`; Failsafe picks up `*IT.java`. Tests follow `should_<result>_when_<condition>` naming where it reads naturally.
 
-CI runs the full `mvn -B verify` on every push and pull request — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tagged releases (`v*`) trigger [`.github/workflows/release.yml`](.github/workflows/release.yml), which republishes the fat JAR and its SHA-256 to a GitHub Release.
+CI runs the full `mvn -B verify` on every push to `main` and every pull request targeting `main` — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tagged releases (`v*`) trigger [`.github/workflows/release.yml`](.github/workflows/release.yml), which republishes the fat JAR and its SHA-256 to a GitHub Release.
 
 ### Cutting a release
 
 Recommended:
 
 ```bash
-scripts/release.sh 0.7.0
+scripts/release.sh 0.7.2
 ```
 
-This bumps `pom.xml`, runs the full test suite, commits, tags `v0.7.0`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
+This bumps `pom.xml`, runs the full test suite, commits, tags `v0.7.2`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
 
 Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
 

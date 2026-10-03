@@ -140,7 +140,7 @@ For a release `vX.Y.Z`, the GitHub Release page will host:
 
 | Asset | Size | Purpose |
 |---|---|---|
-| `data-bridge-vX.Y.Z.jar` | ~80 MB | Fat JAR with all 5 JDBC drivers shaded in. Download this. |
+| `data-bridge-vX.Y.Z.jar` | ~24 MB | Fat JAR with all 5 JDBC drivers shaded in. Download this. |
 | `data-bridge-vX.Y.Z.jar.sha256` | small | SHA-256 of the JAR. Verify with `sha256sum -c data-bridge-vX.Y.Z.jar.sha256`. |
 | Auto-generated release notes | — | List of merged PRs / commits since the previous tag. |
 
