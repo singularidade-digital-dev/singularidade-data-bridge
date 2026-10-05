@@ -111,6 +111,8 @@ The tool runs every connection with `setReadOnly(true)`. It never issues anythin
 
 ## Quick start
 
+The credentials in the examples below (`alice` / `s3cret`) are placeholders. Use a read-only database user of your own.
+
 ### Extract a single table
 
 ```bash
