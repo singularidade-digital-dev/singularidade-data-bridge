@@ -1227,7 +1227,7 @@ public final class JdbcSource implements Source {
                 case Types.BOOLEAN, Types.BIT -> ps.setBoolean(index, parseBoolean(value));
                 case Types.DATE -> ps.setDate(index, Date.valueOf(value.strip()));
                 case Types.TIME -> ps.setTime(index, Time.valueOf(value.strip()));
-                case Types.TIMESTAMP -> ps.setTimestamp(index, Timestamp.valueOf(value.strip().replace('T', ' ')));
+                case Types.TIMESTAMP -> ps.setTimestamp(index, parseTimestamp(value));
                 default -> ps.setString(index, value);
             }
         } catch (IllegalArgumentException e) {
@@ -1235,6 +1235,12 @@ public final class JdbcSource implements Source {
                 "parameter " + name + ": cannot convert '" + value + "' to " + JDBCType.valueOf(sqlType).getName(),
                 "dates are yyyy-mm-dd, timestamps yyyy-mm-dd hh:mm:ss", e);
         }
+    }
+
+    /** {@code yyyy-mm-dd[ T]hh:mm:ss[.f]}, or a plain {@code yyyy-mm-dd} meaning midnight. */
+    private static Timestamp parseTimestamp(String value) {
+        String v = value.strip().replace('T', ' ');
+        return Timestamp.valueOf(v.length() == 10 ? v + " 00:00:00" : v);
     }
 
     private static boolean parseBoolean(String value) {

@@ -28,6 +28,8 @@ class RunQueryCommandFbIT {
         SELECT ID, CODEXT FROM PRITENSESQ WHERE ID = :id
         -- name: apaga
         DELETE FROM TBSGHCOLUNAS WHERE TABELA = :tabela
+        -- name: desde
+        SELECT COUNT(*) AS N FROM PRITENSESQ WHERE DTCAD >= :desde
         """;
 
     private static FbFixture fx;
@@ -73,5 +75,14 @@ class RunQueryCommandFbIT {
         assertThat(run(q, "--name", "colunas", "--param", "tabela=X", "--param", "extra=1")).isEqualTo(2);
         assertThat(run(q, "--name", "nao_existe", "--param", "tabela=X")).isEqualTo(2);
         assertThat(run(q, "--name", "apaga", "--param", "tabela=PRITENSESQ")).isEqualTo(2);
+    }
+
+    @Test
+    void should_accept_a_plain_date_for_a_timestamp_parameter(@TempDir Path tmp) throws Exception {
+        Path q = Files.writeString(tmp.resolve("q.sql"), QUERIES);
+        Path out = tmp.resolve("out.json");
+        assertThat(run(q, "--name", "desde", "--param", "desde=2000-01-01", "--out", out.toString(), "-q")).isZero();
+        assertThat(new ObjectMapper().readTree(out.toFile()).get("rows").get(0).get("N").asLong()).isEqualTo(2);
+        assertThat(run(q, "--name", "desde", "--param", "desde=2000-01-01T08:30:00", "--out", out.toString(), "-q")).isZero();
     }
 }

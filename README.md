@@ -291,7 +291,7 @@ data-bridge run-query --jdbc-url <url> [credentials] --file <queries.sql> --name
 
 - **File format:** blocks introduced by a line `-- name: <id>`; comment lines right after it are a description; one statement per block; a trailing `;` is optional. Only comments and blank lines may precede the first block. Duplicate names and empty blocks are errors.
 - **Placeholders:** `:key` anywhere in code. Inside string literals, comments and quoted identifiers they are text, and PostgreSQL's `::type` cast is left alone. A name used twice is bound twice.
-- **Values** are converted to the type the driver reports for each placeholder (integers, decimals, booleans, `yyyy-mm-dd` dates, `yyyy-mm-dd hh:mm:ss` timestamps, text otherwise). A value that does not convert is exit 2.
+- **Values** are converted to the type the driver reports for each placeholder (integers, decimals, booleans, `yyyy-mm-dd` dates, `yyyy-mm-dd hh:mm:ss` timestamps — a plain date means midnight — text otherwise). A value that does not convert is exit 2.
 - **Always read-only**, through the same guard as `query`. Missing or unknown parameters and unknown names are exit 2 (the error lists the available names).
 - Keep the queries file in the consumer's repository: it is reviewed like code, which is what makes it safer than free-form SQL.
 
