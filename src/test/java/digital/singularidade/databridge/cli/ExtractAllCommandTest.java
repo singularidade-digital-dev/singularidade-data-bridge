@@ -40,4 +40,21 @@ class ExtractAllCommandTest {
         assertThat(cmd.skipCardinality).isTrue();
         assertThat(cmd.quiet).isTrue();
     }
+
+    @Test
+    void should_keep_ddl_on_when_include_ddl_is_given_explicitly() {
+        ExtractAllCommand cmd = new ExtractAllCommand();
+        new CommandLine(cmd).parseArgs("--jdbc-url", "u", "--out", "/tmp/x", "--include-ddl");
+        assertThat(cmd.includeDdl).isTrue();
+    }
+
+    @Test
+    void should_turn_ddl_off_only_with_no_include_ddl() {
+        ExtractAllCommand off = new ExtractAllCommand();
+        new CommandLine(off).parseArgs("--jdbc-url", "u", "--out", "/tmp/x", "--no-include-ddl");
+        assertThat(off.includeDdl).isFalse();
+        ExtractAllCommand byDefault = new ExtractAllCommand();
+        new CommandLine(byDefault).parseArgs("--jdbc-url", "u", "--out", "/tmp/x");
+        assertThat(byDefault.includeDdl).isTrue();
+    }
 }
