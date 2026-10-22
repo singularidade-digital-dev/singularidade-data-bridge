@@ -40,7 +40,7 @@ class ExtractCommandIT {
             ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
             JsonNode tree = m.readTree(Files.readString(metadata));
 
-            assertThat(tree.get("version").asText()).isEqualTo("1.0");
+            assertThat(tree.get("version").asText()).isEqualTo("1.1");
             assertThat(tree.get("source").get("driver").asText()).isEqualTo("postgresql");
             assertThat(tree.get("source").get("url").asText()).contains("password=***");
             assertThat(tree.get("primaryKey").get(0).asText()).isEqualTo("id");

@@ -14,6 +14,7 @@ import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.SourceInfo;
 import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.TableInfo;
+import digital.singularidade.databridge.output.Trigger;
 import digital.singularidade.databridge.output.UniqueConstraint;
 import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.Source;
@@ -29,7 +30,7 @@ import java.util.concurrent.Callable;
 public final class MetadataPipeline {
 
     public static final String SCHEMA_URL = "https://singularidade.digital/data-bridge/metadata.v1.json";
-    public static final String VERSION = "1.0";
+    public static final String VERSION = "1.1";
     public static final String GENERATOR_NAME = BuildInfo.NAME;
     public static final String GENERATOR_VERSION = BuildInfo.VERSION;
 
@@ -60,8 +61,9 @@ public final class MetadataPipeline {
         List<Index> indexes = step(5, "indexes", () -> source.indexes(schema, table));
         List<UniqueConstraint> ucs = step(6, "unique constraints", () -> source.uniqueConstraints(schema, table));
         List<CheckConstraint> ccs = step(7, "check constraints", () -> source.checkConstraints(schema, table));
-        Sample sample = step(8, "sample", () -> source.sample(schema, table, sampleRows));
-        List<ColumnStats> stats = step(9, "column stats", () -> source.columnStats(schema, table));
+        List<Trigger> triggers = step(8, "triggers", () -> source.triggers(schema, table));
+        Sample sample = step(9, "sample", () -> source.sample(schema, table, sampleRows));
+        List<ColumnStats> stats = step(10, "column stats", () -> source.columnStats(schema, table));
         if (stats.isEmpty() && !"postgresql".equals(source.driverWireName())) {
             warnings.add("columnStats not available for driver '" + source.driverWireName() + "' in MVP");
         }
@@ -72,9 +74,9 @@ public final class MetadataPipeline {
         } else if (columnStatsMode == ColumnStatsMode.OFF) {
             warnings.add("columnStats: skipped (--column-stats-mode=off)");
         }
-        Partitioning part = step(10, "partitioning", () -> source.partitioning(schema, table));
+        Partitioning part = step(11, "partitioning", () -> source.partitioning(schema, table));
 
-        Cardinality card = step(11, "cardinality (" + cardinalityMode.wireName() + ")",
+        Cardinality card = step(12, "cardinality (" + cardinalityMode.wireName() + ")",
             () -> source.cardinality(schema, table, columns, cardinalityMode));
 
         switch (cardinalityMode) {
@@ -98,7 +100,7 @@ public final class MetadataPipeline {
         return new Metadata(
             SCHEMA_URL, VERSION, Instant.now(),
             new Metadata.Generator(GENERATOR_NAME, GENERATOR_VERSION),
-            srcInfo, tableInfo, columns, pk, fks, indexes, ucs, ccs,
+            srcInfo, tableInfo, columns, pk, fks, indexes, ucs, ccs, triggers,
             sample, filteredStats, card, part, warnings
         );
     }
@@ -127,7 +129,7 @@ public final class MetadataPipeline {
         try {
             T result = body.call();
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            progress.printf("[%d/11] %-22s ok (%dms)%n", n, label, ms);
+            progress.printf("[%d/12] %-22s ok (%dms)%n", n, label, ms);
             return result;
         } catch (RuntimeException e) {
             throw e;
