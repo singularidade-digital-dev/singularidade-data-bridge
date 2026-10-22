@@ -34,7 +34,7 @@
         <jaybird.version>6.0.7</jaybird.version>
         <ojdbc.version>23.6.0.24.10</ojdbc.version>
         <mssql.version>12.10.2.jre11</mssql.version>
-        <mysql.version>9.7.0</mysql.version>
+        <mysql.version>26.7.0</mysql.version>
 
         <junit.version>5.11.4</junit.version>
         <assertj.version>3.26.3</assertj.version>
