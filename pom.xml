@@ -26,25 +26,25 @@
         <maven.compiler.release>${java.version}</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <picocli.version>4.7.6</picocli.version>
-        <jackson.version>2.18.12</jackson.version>
-        <slf4j.version>2.0.16</slf4j.version>
+        <picocli.version>4.7.7</picocli.version>
+        <jackson.version>2.22.4</jackson.version>
+        <slf4j.version>2.0.20</slf4j.version>
 
         <postgres.version>42.7.14</postgres.version>
         <jaybird.version>6.0.7</jaybird.version>
-        <ojdbc.version>23.6.0.24.10</ojdbc.version>
+        <ojdbc.version>23.26.3.0.0</ojdbc.version>
         <mssql.version>12.10.2.jre11</mssql.version>
         <mysql.version>9.7.0</mysql.version>
 
         <junit.version>5.11.4</junit.version>
-        <assertj.version>3.26.3</assertj.version>
-        <testcontainers.version>1.21.2</testcontainers.version>
-        <h2.version>2.3.232</h2.version>
+        <assertj.version>3.27.7</assertj.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
+        <h2.version>2.5.252</h2.version>
 
-        <compiler.plugin.version>3.13.0</compiler.plugin.version>
-        <surefire.plugin.version>3.5.2</surefire.plugin.version>
-        <failsafe.plugin.version>3.5.2</failsafe.plugin.version>
-        <shade.plugin.version>3.6.0</shade.plugin.version>
+        <compiler.plugin.version>3.16.0</compiler.plugin.version>
+        <surefire.plugin.version>3.6.0</surefire.plugin.version>
+        <failsafe.plugin.version>3.6.0</failsafe.plugin.version>
+        <shade.plugin.version>3.6.2</shade.plugin.version>
         <cyclonedx.plugin.version>2.9.3</cyclonedx.plugin.version>
     </properties>
 
