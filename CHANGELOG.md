@@ -6,6 +6,15 @@ those changes are listed under **Changed** or **Removed**).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-22
+
+### Added
+- `list-generators` (Firebird): the database's user generators by name, sorted, without current values or identity-column generators.
+- `--no-include-ddl` to turn the DDL file off.
+
+### Fixed
+- `--include-ddl` given explicitly turned the DDL file off (picocli flipped the default-true flag). Reported by the sgh-web team.
+
 ## [0.9.0] - 2026-10-22
 
 ### Added
@@ -97,7 +106,8 @@ those changes are listed under **Changed** or **Removed**).
 ### Added
 - First release: `extract`, `list-tables`, `serve` (HTTP); `metadata.json` and TSV output; PostgreSQL, Firebird, Oracle, SQL Server and MySQL drivers in one JAR.
 
-[Unreleased]: https://github.com/singularidade-digital-dev/singularidade-data-bridge/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/singularidade-digital-dev/singularidade-data-bridge/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/singularidade-digital-dev/singularidade-data-bridge/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/singularidade-digital-dev/singularidade-data-bridge/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/singularidade-digital-dev/singularidade-data-bridge/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/singularidade-digital-dev/singularidade-data-bridge/compare/v0.7.1...v0.7.2

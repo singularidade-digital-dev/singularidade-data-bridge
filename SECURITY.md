@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest minor release line gets fixes (currently **0.9.x**). Older versions are not patched — upgrade.
+Only the latest minor release line gets fixes (currently **0.10.x**). Older versions are not patched — upgrade.
 
 ## Reporting a vulnerability
 
