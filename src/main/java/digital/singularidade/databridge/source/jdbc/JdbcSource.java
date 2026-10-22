@@ -13,8 +13,18 @@ import digital.singularidade.databridge.output.Partitioning;
 import digital.singularidade.databridge.output.QueryResult;
 import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.TableInfo;
+import digital.singularidade.databridge.output.Trigger;
 import digital.singularidade.databridge.output.UniqueConstraint;
 import digital.singularidade.databridge.source.Source;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbCheck;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbColumn;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbDomain;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbIndex;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbKey;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbTrigger;
+import digital.singularidade.databridge.source.jdbc.firebird.FirebirdCatalog;
+import digital.singularidade.databridge.source.jdbc.firebird.FirebirdTypes;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -48,6 +58,7 @@ public final class JdbcSource implements Source {
     private final Map<String, List<String>> pkCache = new HashMap<>();
     private final Map<String, PgClassInfo> pgClassCache = new HashMap<>();
     private final Map<String, Map<String, PgStatsEntry>> pgStatsCache = new HashMap<>();
+    private final Map<String, FbTable> fbTables = new HashMap<>();
 
     private record PgClassInfo(String owner, Long approxRows, String viewDef,
                                 String partitionStrategy, List<String> partitionKey) {}
@@ -269,6 +280,46 @@ public final class JdbcSource implements Source {
             throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
                 "columns failed: " + e.getMessage(), null, e);
         }
+        return hints == DriverHints.FIREBIRD ? enrichFirebirdColumns(out, firebirdTable(table)) : out;
+    }
+
+    /**
+     * The Firebird catalog model of {@code table}, read once per run and shared by metadata.json
+     * enrichment and the DDL builder.
+     */
+    public FbTable firebirdTable(String table) {
+        FbTable cached = fbTables.get(table);
+        if (cached != null) return cached;
+        FbTable read = FirebirdCatalog.read(connection, table);
+        fbTables.put(table, read);
+        return read;
+    }
+
+    /** Adds what JDBC metadata cannot say: native type, charset, collation, domain, generator link. */
+    private static List<Column> enrichFirebirdColumns(List<Column> columns, FbTable t) {
+        Map<String, FbColumn> byName = new HashMap<>();
+        for (FbColumn f : t.columns()) byName.put(f.name(), f);
+        List<Column> out = new ArrayList<>(columns.size());
+        for (Column c : columns) {
+            FbColumn f = byName.get(c.name());
+            if (f == null) {
+                out.add(c);
+                continue;
+            }
+            FbDomain d = t.domain(f.domainName()).orElse(null);
+            Column.Domain domain = d == null ? null : new Column.Domain(d.name(), d.notNull(),
+                d.defaultValue(), FirebirdCatalog.stripKeyword(d.checkSource(), "CHECK"));
+            Column.Sequence sequence = f.sequence() == null ? c.sequence()
+                : new Column.Sequence(f.sequence().generator(), null, f.sequence().source(), f.sequence().trigger());
+            Column.Generated generated = new Column.Generated(c.generated().isIdentity(),
+                c.generated().isComputed() || f.computedSource() != null,
+                f.computedSource() != null ? f.computedSource() : c.generated().generationExpression());
+            String sqlType = FirebirdTypes.isBlob(f.type()) ? FirebirdTypes.blobSqlType(f.type()) : c.sqlType();
+            out.add(new Column(c.name(), c.ordinalPosition(), sqlType, c.jdbcType(), c.nullable(),
+                c.primaryKey(), c.characterMaxLength(), c.numericPrecision(), c.numericScale(),
+                c.defaultValue(), c.comment(), generated, sequence, f.collation(), f.nativeType(),
+                f.charset(), domain));
+        }
         return out;
     }
 
@@ -381,6 +432,7 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<Index> indexes(String schema, String table) {
+        if (hints == DriverHints.FIREBIRD) return firebirdIndexes(firebirdTable(table));
         Map<String, IndexBuilder> grouped = new LinkedHashMap<>();
         try (ResultSet rs = connection.getMetaData()
                 .getIndexInfo(connection.getCatalog(), schema, table, false, false)) {
@@ -410,6 +462,20 @@ public final class JdbcSource implements Source {
             PgIndexAugment a = augments.get(b.name);
             out.add(new Index(b.name, List.copyOf(b.columns), List.copyOf(b.ordinalAsc),
                 b.unique, primary, a != null ? a.method() : null, a != null ? a.where() : null));
+        }
+        return out;
+    }
+
+    /** Firebird indexes straight from the catalog: segment order, direction, expression, state, owner. */
+    private static List<Index> firebirdIndexes(FbTable t) {
+        String pkIndex = t.primaryKey() == null ? null : t.primaryKey().indexName();
+        List<Index> out = new ArrayList<>();
+        for (FbIndex i : t.indexes()) {
+            List<Boolean> asc = i.expression() != null
+                ? List.of(!i.descending())
+                : Collections.nCopies(i.columns().size(), !i.descending());
+            out.add(new Index(i.name(), i.columns(), List.copyOf(asc), i.unique(), i.name().equals(pkIndex),
+                null, null, i.expression(), i.active(), i.constraintName()));
         }
         return out;
     }
@@ -456,6 +522,11 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<UniqueConstraint> uniqueConstraints(String schema, String table) {
+        if (hints == DriverHints.FIREBIRD) {
+            List<UniqueConstraint> out = new ArrayList<>();
+            for (FbKey k : firebirdTable(table).uniques()) out.add(new UniqueConstraint(k.name(), k.columns()));
+            return out;
+        }
         if (hints != DriverHints.PG) return List.of();
         String sql = """
             SELECT tc.constraint_name, kcu.column_name, kcu.ordinal_position
@@ -489,6 +560,13 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<CheckConstraint> checkConstraints(String schema, String table) {
+        if (hints == DriverHints.FIREBIRD) {
+            List<CheckConstraint> out = new ArrayList<>();
+            for (FbCheck ck : firebirdTable(table).checks()) {
+                out.add(new CheckConstraint(ck.name(), FirebirdCatalog.stripKeyword(ck.source(), "CHECK")));
+            }
+            return out;
+        }
         if (hints != DriverHints.PG) return List.of();
         String sql = """
             SELECT cc.constraint_name, cc.check_clause
@@ -514,6 +592,17 @@ public final class JdbcSource implements Source {
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
                 "checkConstraints failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
+    @Override
+    public List<Trigger> triggers(String schema, String table) {
+        if (hints != DriverHints.FIREBIRD) return List.of();
+        List<Trigger> out = new ArrayList<>();
+        for (FbTrigger t : firebirdTable(table).triggers()) {
+            out.add(new Trigger(t.name(), t.timing(), t.events(), t.position(), t.active(), t.body(),
+                t.generators()));
         }
         return out;
     }
@@ -639,7 +728,9 @@ public final class JdbcSource implements Source {
     public Sample sample(String schema, String table, int limit) {
         if (limit <= 0) return new Sample(0, List.of());
         String fqn = fullyQualified(schema, table);
-        String sql = "SELECT * FROM " + fqn + " LIMIT " + limit;
+        String sql = hints == DriverHints.FIREBIRD
+            ? "SELECT FIRST " + limit + " * FROM " + fqn
+            : "SELECT * FROM " + fqn + " LIMIT " + limit;
         List<Map<String, Object>> rows = new ArrayList<>();
         try (Statement st = connection.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
