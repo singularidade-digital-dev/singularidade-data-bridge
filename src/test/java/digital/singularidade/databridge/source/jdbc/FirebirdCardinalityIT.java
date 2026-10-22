@@ -4,6 +4,8 @@ import digital.singularidade.databridge.output.Cardinality;
 import digital.singularidade.databridge.output.Column;
 import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.support.FbFixture;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -12,10 +14,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class FirebirdCardinalityIT {
 
+    private static FbFixture fx;
+
+    @BeforeAll
+    static void start() { fx = new FbFixture(); }
+
+    @AfterAll
+    static void stop() { fx.close(); }
+
     @Test
     void approximate_mode_derives_total_and_per_column_distinct_from_index_stats() {
-        try (FbFixture fx = new FbFixture();
-             JdbcSource src = JdbcSource.open(fx.jdbcUrl())) {
+        try (JdbcSource src = JdbcSource.open(fx.jdbcUrl())) {
 
             assertThat(src.driverWireName()).isEqualTo("firebird");
 
@@ -50,8 +59,7 @@ class FirebirdCardinalityIT {
 
     @Test
     void exact_mode_still_works_on_firebird() {
-        try (FbFixture fx = new FbFixture();
-             JdbcSource src = JdbcSource.open(fx.jdbcUrl())) {
+        try (JdbcSource src = JdbcSource.open(fx.jdbcUrl())) {
             List<Column> cols = src.columns(null, "PRODUCTS");
             Cardinality c = src.cardinality(null, "PRODUCTS", cols, CardinalityMode.EXACT);
             assertThat(c.totalRows()).isEqualTo(100L);   // EXACT = COUNT(*) — authoritative
