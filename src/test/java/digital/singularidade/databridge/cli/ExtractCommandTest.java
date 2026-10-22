@@ -69,4 +69,11 @@ class ExtractCommandTest {
             .isInstanceOfSatisfying(DataBridgeException.class,
                 e -> assertThat(e.code()).isEqualTo(ErrorCodes.INVALID_ARGS));
     }
+
+    @Test
+    void should_reject_stable_with_sample_rows_before_connecting() {
+        int exit = new CommandLine(new ExtractCommand()).execute("--jdbc-url", "jdbc:postgresql://127.0.0.1:1/x",
+            "--table", "t", "--out", "/tmp/never", "--stable", "--sample-rows", "1");
+        assertThat(exit).isEqualTo(2);
+    }
 }

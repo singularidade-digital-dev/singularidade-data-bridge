@@ -7,6 +7,7 @@ import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.SqlFileWriter;
+import digital.singularidade.databridge.output.StableOutput;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
 import digital.singularidade.databridge.pipeline.ddl.DdlBuilder;
@@ -79,6 +80,11 @@ public final class ExtractCommand implements Callable<Integer> {
                         + "extraction can substantially inflate the snapshot.")
     boolean includeTriggers;
 
+    @Option(names = "--stable", defaultValue = "false",
+            description = "Output meant for git: no timestamps, versions, URL, warnings, counts or "
+                        + "database-generated names; lists in a fixed order. Implies no cardinality.")
+    boolean stable;
+
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
     @Option(names = {"-v", "--verbose"}, defaultValue = "false") boolean verbose;
 
@@ -87,9 +93,13 @@ public final class ExtractCommand implements Callable<Integer> {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
         try {
             List<String> requested = requestedTables(tables, tablesFile);
-            CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
+            if (stable && sampleRows > 0) {
+                throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                    "--stable cannot be combined with --sample-rows", "Drop --sample-rows for versioned output");
+            }
+            CardinalityMode mode = skipCardinality || stable ? CardinalityMode.SKIP
                 : CardinalityMode.fromWireName(cardinalityMode);
-            ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
+            ColumnStatsMode csMode = stable ? ColumnStatsMode.OFF : ColumnStatsMode.fromWireName(columnStatsMode);
             SourceUrlRedaction urlRed = SourceUrlRedaction.fromWireName(sourceUrlRedaction);
             try (JdbcSource src = JdbcSource.open(conn.resolve())) {
                 src.requireSchema(schema);
@@ -110,11 +120,13 @@ public final class ExtractCommand implements Callable<Integer> {
         Metadata m = new MetadataPipeline(progress, mode, csMode, urlRed)
             .run(src, conn.jdbcUrl(), schema, table, sampleRows);
         Path tableDir = targetDir(outDir, schema, table);
-        new JsonWriter().write(m, tableDir.resolve("metadata.json"));
+        new JsonWriter().write(stable ? StableOutput.metadata(JsonWriter.newMapper(), m) : m,
+            tableDir.resolve("metadata.json"));
         if (tsv) new TsvWriter().writeAll(m, tableDir);
         if (includeDdl) {
             DdlBuilder builder = DdlBuilders.forDriver(src.hints());
-            builder.build(src, schema, table, urlRed.apply(conn.jdbcUrl()), includeTriggers).ifPresent(script -> {
+            builder.build(src, schema, table, urlRed.apply(conn.jdbcUrl()), includeTriggers)
+                .map(script -> stable ? script.stable() : script).ifPresent(script -> {
                 new SqlFileWriter().write(script.toFileText(), tableDir.resolve("ddl.sql"));
                 if (includeTriggers && !script.triggers().isBlank()) {
                     new SqlFileWriter().write(script.triggersFileText(), tableDir.resolve("triggers.sql"));

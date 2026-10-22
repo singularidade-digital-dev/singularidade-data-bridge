@@ -10,6 +10,7 @@ import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.SqlFileWriter;
+import digital.singularidade.databridge.output.StableOutput;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
 import digital.singularidade.databridge.pipeline.ddl.DdlBuilders;
@@ -91,15 +92,24 @@ public final class ExtractAllCommand implements Callable<Integer> {
             description = "Table name(s) to skip. Repeatable: --exclude audit_log --exclude staging.")
     List<String> excludes = new ArrayList<>();
 
+    @Option(names = "--stable", defaultValue = "false",
+            description = "Output meant for git: no timestamps, versions, URL, warnings, counts or "
+                        + "database-generated names; lists in a fixed order. Implies no cardinality.")
+    boolean stable;
+
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
     @Option(names = {"-v", "--verbose"}, defaultValue = "false") boolean verbose;
 
     @Override
     public Integer call() {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
-        CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
+        if (stable && sampleRows > 0) {
+            return CliErrors.report(new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "--stable cannot be combined with --sample-rows", "Drop --sample-rows for versioned output"), verbose);
+        }
+        CardinalityMode mode = skipCardinality || stable ? CardinalityMode.SKIP
             : CardinalityMode.fromWireName(cardinalityMode);
-        ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
+        ColumnStatsMode csMode = stable ? ColumnStatsMode.OFF : ColumnStatsMode.fromWireName(columnStatsMode);
         SourceUrlRedaction urlRed = SourceUrlRedaction.fromWireName(sourceUrlRedaction);
         try (JdbcSource src = JdbcSource.open(conn.resolve())) {
             boolean schemaEmpty = (schema == null || schema.isBlank());
@@ -130,11 +140,13 @@ public final class ExtractAllCommand implements Callable<Integer> {
                     .run(src, conn.jdbcUrl(), schema, table, sampleRows);
 
                 Path tableDir = ExtractCommand.targetDir(outDir, schema, table);
-                new JsonWriter().write(m, tableDir.resolve("metadata.json"));
+                new JsonWriter().write(stable ? StableOutput.metadata(JsonWriter.newMapper(), m) : m,
+                    tableDir.resolve("metadata.json"));
                 if (tsv) new TsvWriter().writeAll(m, tableDir);
                 if (includeDdl) {
                     DdlBuilders.forDriver(src.hints())
                         .build(src, schema, table, urlRed.apply(conn.jdbcUrl()), includeTriggers)
+                        .map(script -> stable ? script.stable() : script)
                         .ifPresent(script -> {
                             new SqlFileWriter().write(script.toFileText(), tableDir.resolve("ddl.sql"));
                             if (includeTriggers && !script.triggers().isBlank()) {
@@ -158,7 +170,8 @@ public final class ExtractAllCommand implements Callable<Integer> {
                     urlRed.apply(conn.jdbcUrl()), schema),
                 summaries.size(),
                 summaries);
-            writeIndex(index, outDir.resolve("_index.json"));
+            writeIndex(stable ? StableOutput.index(JsonWriter.newMapper(), index) : index,
+                outDir.resolve("_index.json"));
 
             progress.printf("Done — wrote %d table(s) + _index.json to %s%n",
                 summaries.size(), outDir.toAbsolutePath());
@@ -168,7 +181,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
         }
     }
 
-    private static void writeIndex(ExtractAllIndex index, Path target) {
+    private static void writeIndex(Object index, Path target) {
         Path dir = target.getParent();
         Path tmp = dir.resolve("." + target.getFileName().toString() + ".partial");
         try {
