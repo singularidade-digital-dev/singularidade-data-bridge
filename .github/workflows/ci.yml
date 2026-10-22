@@ -29,7 +29,7 @@ jobs:
           java-version: '21'
           cache: maven
 
-      - name: Build & verify (unit + driver smoke + Postgres Testcontainer ITs)
+      - name: Build & verify (unit + driver smoke + Postgres/Firebird Testcontainer ITs)
         run: mvn -B -ntp verify
 
       - name: Smoke-check the fat JAR
@@ -50,10 +50,34 @@ jobs:
               exit 1
           fi
 
-      - name: Upload fat JAR as artifact
+      - name: Smoke-check the catalog JAR (no free-form query)
+        run: |
+          test -f target/data-bridge-catalog.jar
+          OUT=$(java -jar target/data-bridge-catalog.jar version)
+          echo "  got: $OUT"
+          case "$OUT" in
+            *" (catalog)") ;;
+            *) echo "::error::catalog JAR version output mismatch"; exit 1 ;;
+          esac
+          if unzip -l target/data-bridge-catalog.jar | grep -q 'databridge/cli/QueryCommand'; then
+              echo "::error::QueryCommand is shipped in the catalog JAR"
+              exit 1
+          fi
+          set +e
+          java -jar target/data-bridge-catalog.jar query --jdbc-url x --sql 'SELECT 1' >/dev/null 2>&1
+          CODE=$?
+          set -e
+          if [ "$CODE" -ne 2 ]; then
+              echo "::error::catalog JAR accepted the query command (exit $CODE)"
+              exit 1
+          fi
+
+      - name: Upload fat JARs as artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: data-bridge-${{ github.sha }}
-          path: target/data-bridge.jar
+          path: |
+            target/data-bridge.jar
+            target/data-bridge-catalog.jar
           retention-days: 14

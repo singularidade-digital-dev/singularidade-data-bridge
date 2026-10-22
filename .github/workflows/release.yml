@@ -67,10 +67,16 @@ jobs:
       - name: Build & verify (full test suite must pass before release)
         run: mvn -B -ntp verify
 
-      - name: Smoke-check the fat JAR
+      - name: Smoke-check both JARs
         run: |
           test -f target/data-bridge.jar
           java -jar target/data-bridge.jar version
+          test -f target/data-bridge-catalog.jar
+          java -jar target/data-bridge-catalog.jar version | grep -q ' (catalog)$'
+          if unzip -l target/data-bridge-catalog.jar | grep -q 'databridge/cli/QueryCommand'; then
+              echo "::error::QueryCommand is shipped in the catalog JAR"
+              exit 1
+          fi
 
       - name: Stage release artifacts
         env:
@@ -78,7 +84,9 @@ jobs:
         run: |
           mkdir -p release
           cp target/data-bridge.jar "release/data-bridge-${TAG}.jar"
-          ( cd release && sha256sum "data-bridge-${TAG}.jar" > "data-bridge-${TAG}.jar.sha256" )
+          cp target/data-bridge-catalog.jar "release/data-bridge-catalog-${TAG}.jar"
+          ( cd release && sha256sum "data-bridge-${TAG}.jar" > "data-bridge-${TAG}.jar.sha256" \
+                       && sha256sum "data-bridge-catalog-${TAG}.jar" > "data-bridge-catalog-${TAG}.jar.sha256" )
           ls -la release/
 
       - name: Create GitHub Release
@@ -90,4 +98,6 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             "release/data-bridge-${TAG}.jar" \
-            "release/data-bridge-${TAG}.jar.sha256"
+            "release/data-bridge-${TAG}.jar.sha256" \
+            "release/data-bridge-catalog-${TAG}.jar" \
+            "release/data-bridge-catalog-${TAG}.jar.sha256"
