@@ -89,6 +89,14 @@ java -jar "data-bridge-${LATEST}.jar" version
 
 Replace `data-bridge-` with `data-bridge-catalog-` for the catalog edition.
 
+Each release also carries a CycloneDX SBOM (`data-bridge-vX.Y.Z.cdx.json`) and GitHub attestations proving the JARs were built by this repository's release workflow:
+
+```bash
+gh attestation verify "data-bridge-${LATEST}.jar" --repo singularidade-digital-dev/singularidade-data-bridge
+```
+
+See [SECURITY.md](SECURITY.md) for the SBOM attestation and how to report a vulnerability, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
 ### Option B — Build from source
 
 Requires JDK 21 and Maven. Docker is needed only for the integration tests.
@@ -193,6 +201,7 @@ Same JSON as `query`. Placeholders are bound as JDBC parameters, so values never
 | `--user` | Database user, when it is not in the URL. |
 | `--password-env VAR` | Read the password from environment variable `VAR`. |
 | `--password-file PATH` | Read the password from a file. Only a final line break is removed; everything else, spaces included, is part of the password. |
+| `--none-charset CHARSET` | Firebird: charset for `CHARACTER SET NONE` text that is not valid UTF-8 (default `WIN1252`). Firebird names (`WIN1252`, `ISO8859_1`, `DOS850`, ...) or Java names. See [Text and character sets](#text-and-character-sets). |
 
 Credentials given as flags are passed to the driver as connection properties. Giving the same credential in the URL **and** in a flag is an error (exit 2), as is giving both `--password-env` and `--password-file`, an unset variable or an empty file. A user in the URL with the password from a flag is fine.
 
@@ -237,7 +246,7 @@ Runs the `extract` pipeline for every table (sequentially, one connection) and w
   "$schema":    "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
   "version":    "1.0",
   "generatedAt": "2026-10-22T12:00:00Z",
-  "generator":  { "name": "singularidade-data-bridge", "version": "0.8.0" },
+  "generator":  { "name": "singularidade-data-bridge", "version": "0.9.0" },
   "source":     { "type": "jdbc", "driver": "postgresql", "url": "jdbc:postgresql://[redacted-host]/mydb", "schema": "public" },
   "tableCount": 12,
   "tables": [ { "schema": "public", "table": "customers", "type": "TABLE", "columnCount": 9, "primaryKey": ["id"], "totalRows": 18432 } ]
@@ -307,8 +316,8 @@ Prints a JSON array of table names (no views). A missing schema is exit 12.
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.8.0            (full JAR)
-# → singularidade-data-bridge 0.8.0 (catalog)  (catalog JAR)
+# → singularidade-data-bridge 0.9.0            (full JAR)
+# → singularidade-data-bridge 0.9.0 (catalog)  (catalog JAR)
 ```
 
 ### Exit codes
@@ -335,6 +344,19 @@ Errors go to **stderr** as one JSON document:
 
 ---
 
+## Text and character sets
+
+The output never depends on the machine: files and stdout are UTF-8 JSON with `\n` line breaks whatever the JVM's default charset, locale or line separator (a CI test runs the JAR under two very different setups and compares the files byte by byte).
+
+**Firebird.**
+
+- A URL without a connection character set (`encoding=`, `charSet=` or `lc_ctype=`) gets `encoding=UTF8`: text in typed columns (`WIN1252`, `ISO8859_1`, `UTF8`, ...) arrives exactly, and NONE text goes through the rule below. Without a connection character set, Jaybird decodes NONE text with the JVM's default charset. The catalog's comments and sources are always read exactly.
+- Text stored with **`CHARACTER SET NONE`** has no encoding attached — legacy databases often mix UTF-8 and WIN1252 rows in the same column. data-bridge decodes it from the stored bytes with one fixed rule: **UTF-8 when the bytes are valid UTF-8, otherwise `--none-charset`** (default `WIN1252`). A byte with no character in the fallback keeps its value (U+0080–U+009F), so nothing is lost. Mixed columns come out right; the only misread is a WIN1252 string that happens to be valid UTF-8 (pairs such as `Ã©`).
+- With an explicit `encoding=...` in the URL, Jaybird decodes NONE text with that charset instead (deterministic, but a mixed column comes out half garbled). Avoid `encoding=NONE`: it makes Jaybird use the JVM's default charset.
+- Comments written by a client connected with charset NONE may already hold `?` in place of accented letters — Firebird replaces them when it stores the comment, so there is nothing left to recover.
+
+---
+
 ## Output contract (`metadata.json`)
 
 Contract version **1.1**. Additive changes bump the minor version; removals or renames bump to `2.0`. Consumers must tolerate unknown fields.
@@ -344,7 +366,7 @@ Contract version **1.1**. Additive changes bump the minor version; removals or r
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
   "version":  "1.1",
   "generatedAt": "2026-10-22T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.8.0" },
+  "generator": { "name": "singularidade-data-bridge", "version": "0.9.0" },
   "source":   { "type": "jdbc", "driver": "firebird", "url": "jdbc:firebirdsql://[redacted-host]//data/sgh.fdb",
                 "schema": null, "table": "PRITENSESQ" },
   "tableInfo":         { "type": "TABLE", "comment": "...", "owner": null, "approximateRowCount": null, "viewDefinition": null },
@@ -510,12 +532,12 @@ mvn verify               # adds the Postgres + Firebird 3/5 Testcontainer ITs (D
 mvn -DskipTests package  # target/data-bridge.jar and target/data-bridge-catalog.jar
 ```
 
-Surefire picks up `*Test.java`; Failsafe picks up `*IT.java`. CI runs `mvn -B verify` on every push to `main` and every pull request, and smoke-checks both JARs — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tags `v*` trigger [`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes both JARs and their SHA-256.
+Surefire picks up `*Test.java`; Failsafe picks up `*IT.java`. CI runs `mvn -B verify` on every push to `main` and every pull request, and smoke-checks both JARs and the SBOM — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tags `v*` trigger [`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes both JARs, their SHA-256, the SBOM and the attestations. Dependabot opens weekly PRs for Maven and GitHub Actions updates ([`.github/dependabot.yml`](.github/dependabot.yml)). Changes are listed in [CHANGELOG.md](CHANGELOG.md); security reports go through [SECURITY.md](SECURITY.md).
 
 ### Cutting a release
 
 ```bash
-scripts/release.sh 0.8.1
+scripts/release.sh 0.9.1
 ```
 
 Bumps `pom.xml`, runs the full test suite, smoke-checks both JARs, commits, tags, pushes and bumps to the next SNAPSHOT. Alternatives, versioning policy and recovery are in [`RELEASING.md`](RELEASING.md).

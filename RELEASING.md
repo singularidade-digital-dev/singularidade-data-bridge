@@ -144,6 +144,8 @@ For a release `vX.Y.Z`, the GitHub Release page will host:
 | `data-bridge-vX.Y.Z.jar.sha256` | small | SHA-256 of the JAR. Verify with `sha256sum -c data-bridge-vX.Y.Z.jar.sha256`. |
 | `data-bridge-catalog-vX.Y.Z.jar` | ~19 MB | Catalog edition: same drivers, no free-form `query` command (`run-query` with a queries file only). |
 | `data-bridge-catalog-vX.Y.Z.jar.sha256` | small | SHA-256 of the catalog JAR. |
+| `data-bridge-vX.Y.Z.cdx.json` | small | CycloneDX SBOM (compile + runtime dependencies shipped in the JARs). |
+| Attestations (repository, not files) | — | Build provenance and SBOM attestations for both JARs, signed through Sigstore by `release.yml`. Verify with `gh attestation verify <jar> --repo singularidade-digital-dev/singularidade-data-bridge`. |
 | Auto-generated release notes | — | List of merged PRs / commits since the previous tag. |
 
 Consumers download via the GitHub Releases API (see the [README install section](README.md#option-a--download-the-release-jar-recommended)) or directly from the release page.
@@ -152,7 +154,9 @@ Consumers download via the GitHub Releases API (see the [README install section]
 
 ## Post-release checklist
 
-- [ ] GitHub Release page shows the new tag, both JARs, and both SHA-256 files.
+- [ ] GitHub Release page shows the new tag, both JARs, both SHA-256 files and the SBOM.
+- [ ] `gh attestation verify` passes for both downloaded JARs.
+- [ ] `CHANGELOG.md` has the version's section (move it out of *Unreleased* before tagging).
 - [ ] `release.yml` run is green.
 - [ ] `mvn -DskipTests dependency:tree` against the released artifact (if depended on by another project) resolves cleanly.
 - [ ] If a downstream consumer (e.g. `mcp-tool-from-table-orgen-ai`) pins to a specific version, bump its pin in a follow-up commit.
