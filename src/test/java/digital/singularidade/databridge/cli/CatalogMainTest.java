@@ -14,7 +14,7 @@ class CatalogMainTest {
     void should_not_expose_free_form_query() {
         CommandLine cl = new CommandLine(new CatalogMain());
         assertThat(cl.getSubcommands().keySet())
-            .containsExactlyInAnyOrder("version", "extract", "extract-all", "list-tables", "run-query");
+            .containsExactlyInAnyOrder("version", "extract", "extract-all", "list-tables", "list-generators", "run-query");
     }
 
     @Test

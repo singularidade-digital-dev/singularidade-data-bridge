@@ -13,9 +13,10 @@ import picocli.CommandLine.Command;
     name = "data-bridge",
     mixinStandardHelpOptions = true,
     versionProvider = CatalogMain.VersionProvider.class,
-    description = "Catalog edition: extract, extract-all, list-tables and run-query (no free-form query).",
+    description = "Catalog edition: extract, extract-all, list-tables, list-generators and run-query "
+                + "(no free-form query).",
     subcommands = { VersionCommand.class, ExtractCommand.class, ExtractAllCommand.class,
-                    ListTablesCommand.class, RunQueryCommand.class }
+                    ListTablesCommand.class, ListGeneratorsCommand.class, RunQueryCommand.class }
 )
 public final class CatalogMain implements Runnable {
 

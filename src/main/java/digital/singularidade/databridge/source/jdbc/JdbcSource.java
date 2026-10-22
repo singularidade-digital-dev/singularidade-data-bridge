@@ -340,6 +340,27 @@ public final class JdbcSource implements Source {
         return name.replace(escape, escape + escape).replace("_", escape + "_").replace("%", escape + "%");
     }
 
+    /**
+     * User generators of a Firebird database, by name, sorted. System generators (flag 1) and the ones
+     * behind identity columns (flag 6) are left out, and so are current values — they are data.
+     */
+    public List<String> listGenerators() {
+        if (hints != DriverHints.FIREBIRD) {
+            throw new DataBridgeException(ErrorCodes.UNSUPPORTED,
+                "list-generators is only available for Firebird", null);
+        }
+        List<String> out = new ArrayList<>();
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("SELECT TRIM(RDB$GENERATOR_NAME) AS gname FROM RDB$GENERATORS "
+                 + "WHERE COALESCE(RDB$SYSTEM_FLAG, 0) = 0 ORDER BY RDB$GENERATOR_NAME")) {
+            while (rs.next()) out.add(rs.getString("gname"));
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "listing generators failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
     @Override
     public List<Column> columns(String schema, String table) {
         List<String> pk = primaryKey(schema, table);

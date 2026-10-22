@@ -76,4 +76,21 @@ class ExtractCommandTest {
             "--table", "t", "--out", "/tmp/never", "--stable", "--sample-rows", "1");
         assertThat(exit).isEqualTo(2);
     }
+
+    @Test
+    void should_keep_ddl_on_when_include_ddl_is_given_explicitly() {
+        ExtractCommand cmd = new ExtractCommand();
+        new CommandLine(cmd).parseArgs("--jdbc-url", "u", "--table", "t", "--out", "/tmp/x", "--include-ddl");
+        assertThat(cmd.includeDdl).isTrue();
+    }
+
+    @Test
+    void should_turn_ddl_off_only_with_no_include_ddl() {
+        ExtractCommand off = new ExtractCommand();
+        new CommandLine(off).parseArgs("--jdbc-url", "u", "--table", "t", "--out", "/tmp/x", "--no-include-ddl");
+        assertThat(off.includeDdl).isFalse();
+        ExtractCommand byDefault = new ExtractCommand();
+        new CommandLine(byDefault).parseArgs("--jdbc-url", "u", "--table", "t", "--out", "/tmp/x");
+        assertThat(byDefault.includeDdl).isTrue();
+    }
 }

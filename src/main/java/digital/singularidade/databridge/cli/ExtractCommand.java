@@ -70,9 +70,9 @@ public final class ExtractCommand implements Callable<Integer> {
             description = "Legacy alias for --cardinality-mode skip.")
     boolean skipCardinality;
 
-    @Option(names = "--include-ddl", defaultValue = "true",
+    @Option(names = "--include-ddl", negatable = true, defaultValue = "true", fallbackValue = "true",
             description = "Write a sibling ddl.sql file with reconstructed CREATE TABLE/INDEX/etc. "
-                        + "Default on for PG/MySQL/Oracle/Firebird. MSSQL gets a placeholder file.")
+                        + "On by default; --no-include-ddl turns it off. MSSQL gets a placeholder file.")
     boolean includeDdl;
 
     @Option(names = "--include-triggers", defaultValue = "false",

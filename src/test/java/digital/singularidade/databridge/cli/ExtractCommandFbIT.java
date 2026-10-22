@@ -95,4 +95,13 @@ class ExtractCommandFbIT {
         assertThat(err.toString(StandardCharsets.UTF_8)).contains("TABLE_NOT_FOUND").contains("NAOEXISTE, OUTRA");
         assertThat(tmp.resolve("out")).doesNotExist();
     }
+
+    @Test
+    void should_write_ddl_when_include_ddl_is_passed_explicitly(@TempDir Path tmp) {
+        assertThat(extract(tmp, "--table", "TBPAI", "--include-ddl", "--include-triggers")).isZero();
+        assertThat(tmp.resolve("TBPAI").resolve("ddl.sql")).exists();
+        assertThat(extract(tmp.resolve("off"), "--table", "TBPAI", "--no-include-ddl")).isZero();
+        assertThat(tmp.resolve("off").resolve("TBPAI").resolve("ddl.sql")).doesNotExist();
+        assertThat(tmp.resolve("off").resolve("TBPAI").resolve("metadata.json")).exists();
+    }
 }

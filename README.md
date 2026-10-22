@@ -76,8 +76,8 @@ Each release publishes two fat JARs (~19 MB each; both bundle the five JDBC driv
 
 | JAR | Commands | When |
 |---|---|---|
-| `data-bridge-vX.Y.Z.jar` | `extract`, `extract-all`, `list-tables`, `query`, `run-query`, `version` | General use. |
-| `data-bridge-catalog-vX.Y.Z.jar` | `extract`, `extract-all`, `list-tables`, `run-query`, `version` | Catalog work where free-form SQL must not be possible. `version` prints `... (catalog)`. |
+| `data-bridge-vX.Y.Z.jar` | `extract`, `extract-all`, `list-tables`, `list-generators`, `query`, `run-query`, `version` | General use. |
+| `data-bridge-catalog-vX.Y.Z.jar` | `extract`, `extract-all`, `list-tables`, `list-generators`, `run-query`, `version` | Catalog work where free-form SQL must not be possible. `version` prints `... (catalog)`. |
 
 ```bash
 LATEST=$(curl -s https://api.github.com/repos/singularidade-digital-dev/singularidade-data-bridge/releases/latest | jq -r .tag_name)
@@ -226,7 +226,7 @@ data-bridge extract --jdbc-url <url> [credentials] [--schema <name>]
 | `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: pre-computed statistics (`pg_class`/`pg_stats` on PG; `RDB$INDICES.RDB$STATISTICS` on Firebird). `skip`: empty cardinality. BLOB / CLOB / BYTEA / text-BLOB columns are always omitted. |
 | `--column-stats-mode` | no | `histogram-only` | `full` keeps `mostCommonValues` + `mostCommonFrequencies` (PII risk); `off` empties `columnStats`. |
 | `--source-url-redaction` | no | `host-port` | `none` keeps host:port, `host-port` replaces them with `[redacted-host]`, `full` keeps only the JDBC scheme. |
-| `--include-ddl` | no | on | Write `ddl.sql` next to `metadata.json`. |
+| `--include-ddl` / `--no-include-ddl` | no | on | Write `ddl.sql` next to `metadata.json`; `--no-include-ddl` turns it off. |
 | `--include-triggers` | no | off | Also write `triggers.sql`. |
 | `--stable` | no | off | Versionable output (see [Stable output](#stable-output---stable)). Implies no cardinality and no column statistics; cannot be combined with `--sample-rows`. |
 | `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
@@ -312,12 +312,20 @@ data-bridge list-tables --jdbc-url <url> [credentials] [--schema <name>] [-v]
 
 Prints a JSON array of table names (no views). A missing schema is exit 12.
 
+### `list-generators` (Firebird)
+
+```text
+data-bridge list-generators --jdbc-url <url> [credentials] [-v]
+```
+
+Prints a JSON array of the database's user generators, by name and sorted — no current values, and without the generators behind identity columns. Use it to find generators only the application calls (e.g. a `GEN_<TABLE>_ID` naming convention), which `columns[].sequence` cannot link because the catalog records no dependency for them. Other drivers: exit 64.
+
 ### `version`
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.9.0            (full JAR)
-# → singularidade-data-bridge 0.9.0 (catalog)  (catalog JAR)
+# → singularidade-data-bridge 0.10.0            (full JAR)
+# → singularidade-data-bridge 0.10.0 (catalog)  (catalog JAR)
 ```
 
 ### Exit codes
@@ -464,7 +472,7 @@ Names the database generated are never written, so replaying lets Firebird assig
 | Driver | URL prefix | Integration tests | `approximate` cardinality | DDL | Notes |
 |---|---|---|---|---|---|
 | PostgreSQL | `jdbc:postgresql:` | ✅ Testcontainer (`postgres:16`) | ✅ `pg_class.reltuples` + `pg_stats` | ✅ | floor PG 11; PG 12+ for GENERATED columns |
-| Firebird | `jdbc:firebirdsql:` | ✅ Testcontainer (`firebirdsql/firebird:3.0.14`, smoke on `5.0.4`) with an SGH-like schema | ✅ `RDB$INDICES.RDB$STATISTICS` — only **indexed** columns | ✅ replayable | **Firebird 3+**; domains, charsets, triggers, generators in `metadata.json` |
+| Firebird | `jdbc:firebirdsql:` | ✅ Testcontainer (`firebirdsql/firebird:3.0.14`, smoke on `5.0.4`) with an SGH-like schema | ✅ `RDB$INDICES.RDB$STATISTICS` — only **indexed** columns | ✅ replayable | **Firebird 3.0+**; domains, charsets, triggers, generators in `metadata.json`. Firebird 2.5 is not supported: Jaybird 6 refuses the connection, and even with `enableProtocol=*` the catalog reader needs 3.0 columns. |
 | Oracle | `jdbc:oracle:` | ⚠️ driver-load smoke | ❌ | ✅ `DBMS_METADATA` | floor 12c |
 | SQL Server | `jdbc:sqlserver:` | ⚠️ driver-load smoke | ❌ | ⚠️ placeholder | floor 2017 |
 | MySQL | `jdbc:mysql:` | ⚠️ driver-load smoke | ❌ | ✅ `SHOW CREATE TABLE` | floor 5.7 |
@@ -537,7 +545,7 @@ Surefire picks up `*Test.java`; Failsafe picks up `*IT.java`. CI runs `mvn -B ve
 ### Cutting a release
 
 ```bash
-scripts/release.sh 0.9.1
+scripts/release.sh 0.10.1
 ```
 
 Bumps `pom.xml`, runs the full test suite, smoke-checks both JARs, commits, tags, pushes and bumps to the next SNAPSHOT. Alternatives, versioning policy and recovery are in [`RELEASING.md`](RELEASING.md).
