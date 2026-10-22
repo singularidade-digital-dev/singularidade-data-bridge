@@ -21,6 +21,7 @@ public final class ListTablesCommand implements Callable<Integer> {
     @Override
     public Integer call() {
         try (JdbcSource src = JdbcSource.open(conn.resolve())) {
+            src.requireSchema(schema);
             List<String> tables = src.listTables(schema);
             ObjectMapper mapper = JsonWriter.newMapper();
             System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(tables));

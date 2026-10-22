@@ -45,7 +45,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -234,6 +236,60 @@ public final class JdbcSource implements Source {
                 "listTables failed: " + e.getMessage(), null, e);
         }
         return out;
+    }
+
+    /**
+     * The table's name as stored: an exact match first, then the driver's case for unquoted identifiers
+     * (upper on Firebird/Oracle, lower on PostgreSQL). JDBC pattern wildcards ({@code _}, {@code %}) are
+     * escaped and every hit is compared exactly, so {@code TB_X} never resolves to {@code TBAX}.
+     */
+    public Optional<String> resolveTable(String schema, String table) {
+        if (table == null || table.isBlank()) return Optional.empty();
+        List<String> candidates = new ArrayList<>(List.of(table));
+        String folded = switch (hints) {
+            case FIREBIRD, ORACLE -> table.toUpperCase(Locale.ROOT);
+            case PG -> table.toLowerCase(Locale.ROOT);
+            case MSSQL, MYSQL -> table;
+        };
+        if (!folded.equals(table)) candidates.add(folded);
+        try {
+            DatabaseMetaData md = connection.getMetaData();
+            String escape = md.getSearchStringEscape();
+            for (String candidate : candidates) {
+                try (ResultSet rs = md.getTables(connection.getCatalog(),
+                        schema == null ? null : escapePattern(schema, escape),
+                        escapePattern(candidate, escape), null)) {
+                    while (rs.next()) {
+                        if (candidate.equals(rs.getString("TABLE_NAME"))) return Optional.of(candidate);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "table lookup failed: " + e.getMessage(), null, e);
+        }
+        return Optional.empty();
+    }
+
+    /** Fails with SCHEMA_NOT_FOUND when {@code schema} is given and missing (PostgreSQL, Oracle, SQL Server). */
+    public void requireSchema(String schema) {
+        if (schema == null || schema.isBlank()) return;
+        if (hints != DriverHints.PG && hints != DriverHints.ORACLE && hints != DriverHints.MSSQL) return;
+        try (ResultSet rs = connection.getMetaData().getSchemas()) {
+            while (rs.next()) {
+                if (schema.equals(rs.getString("TABLE_SCHEM"))) return;
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "schema lookup failed: " + e.getMessage(), null, e);
+        }
+        throw new DataBridgeException(ErrorCodes.SCHEMA_NOT_FOUND, "schema not found: " + schema,
+            "Schema names are case-sensitive here; list them with your database client");
+    }
+
+    private static String escapePattern(String name, String escape) {
+        if (escape == null || escape.isEmpty()) return name;
+        return name.replace(escape, escape + escape).replace("_", escape + "_").replace("%", escape + "%");
     }
 
     @Override

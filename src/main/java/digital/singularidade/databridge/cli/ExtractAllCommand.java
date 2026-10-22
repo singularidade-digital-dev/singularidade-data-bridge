@@ -109,6 +109,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                     "Firebird is the only single-namespace driver that can omit --schema. "
                   + "For PG/MySQL/Oracle/MSSQL pass e.g. --schema=public.");
             }
+            src.requireSchema(schema);
             String schemaLabel = schemaEmpty ? "(no schema — Firebird)" : "schema '" + schema + "'";
             Set<String> excludeSet = new HashSet<>(excludes);
             List<String> tables = src.listTables(schema, includeViews).stream()

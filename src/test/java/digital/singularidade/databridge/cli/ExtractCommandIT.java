@@ -81,4 +81,25 @@ class ExtractCommandIT {
             assertThat(tree.get("cardinality").get("totalRows").asLong()).isEqualTo(5L);
         }
     }
+
+    @Test
+    void should_fail_with_exit_12_for_a_missing_schema(@TempDir Path tmp) {
+        try (PgFixture fx = new PgFixture()) {
+            CommandLine cl = new CommandLine(new Main()).setErr(new PrintWriter(OutputStream.nullOutputStream()));
+            assertThat(cl.execute("extract", "--jdbc-url", fx.jdbcUrl(), "--schema", "nao_existe",
+                "--table", "cliente", "--out", tmp.toString())).isEqualTo(12);
+            assertThat(cl.execute("list-tables", "--jdbc-url", fx.jdbcUrl(), "--schema", "nao_existe")).isEqualTo(12);
+        }
+    }
+
+    @Test
+    void should_find_unquoted_postgres_names_given_in_upper_case(@TempDir Path tmp) {
+        try (PgFixture fx = new PgFixture()) {
+            int exit = new CommandLine(new Main()).setErr(new PrintWriter(OutputStream.nullOutputStream()))
+                .execute("extract", "--jdbc-url", fx.jdbcUrl(), "--schema", "atl", "--table", "CLIENTE",
+                    "--out", tmp.toString(), "--cardinality-mode", "skip", "-q");
+            assertThat(exit).isZero();
+            assertThat(tmp.resolve("atl.cliente").resolve("metadata.json")).exists();
+        }
+    }
 }
