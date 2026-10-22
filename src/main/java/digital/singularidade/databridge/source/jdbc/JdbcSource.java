@@ -72,10 +72,14 @@ public final class JdbcSource implements Source {
     }
 
     public static JdbcSource open(String jdbcUrl) {
-        DriverHints hints = DriverHints.fromUrl(jdbcUrl);
-        String urlWithAppName = withApplicationName(jdbcUrl, hints);
+        return open(new ConnectionSettings(jdbcUrl, null, null));
+    }
+
+    public static JdbcSource open(ConnectionSettings settings) {
+        DriverHints hints = DriverHints.fromUrl(settings.url());
+        String urlWithAppName = withApplicationName(settings.url(), hints);
         try {
-            Connection c = DriverManager.getConnection(urlWithAppName);
+            Connection c = DriverManager.getConnection(urlWithAppName, settings.toProperties());
             c.setReadOnly(true);
             ServerVersion version = detectServerVersion(c, hints);
             if (hints == DriverHints.PG) {

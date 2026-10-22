@@ -15,7 +15,7 @@ class ExtractAllCommandTest {
             "--schema", "shop",
             "--out", "/tmp/snap"
         );
-        assertThat(cmd.jdbcUrl).isEqualTo("jdbc:postgresql://h/d");
+        assertThat(cmd.conn.jdbcUrl()).isEqualTo("jdbc:postgresql://h/d");
         assertThat(cmd.schema).isEqualTo("shop");
         assertThat(cmd.outDir.toString()).isEqualTo("/tmp/snap");
         assertThat(cmd.sampleRows).isZero();         // PII-safe default

@@ -16,7 +16,7 @@ class ExtractCommandTest {
             "--table", "cliente",
             "--out", "/tmp/c"
         );
-        assertThat(cmd.jdbcUrl).isEqualTo("jdbc:postgresql://h/d");
+        assertThat(cmd.conn.jdbcUrl()).isEqualTo("jdbc:postgresql://h/d");
         assertThat(cmd.schema).isEqualTo("atl");
         assertThat(cmd.table).isEqualTo("cliente");
         assertThat(cmd.outDir.toString()).isEqualTo("/tmp/c");

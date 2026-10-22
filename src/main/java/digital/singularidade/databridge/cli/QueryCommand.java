@@ -3,11 +3,11 @@ package digital.singularidade.databridge.cli;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
-import digital.singularidade.databridge.error.UrlRedaction;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.QueryResult;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
 
 import java.io.IOException;
@@ -20,7 +20,7 @@ import java.util.concurrent.Callable;
                 + "DDL is never permitted. Returns JSON with column metadata + rows.")
 public final class QueryCommand implements Callable<Integer> {
 
-    @Option(names = "--jdbc-url", required = true) String jdbcUrl;
+    @Mixin ConnectionOptions conn;
 
     @Option(names = "--sql", required = true,
             description = "The SQL to execute. Must be a single statement.")
@@ -49,23 +49,17 @@ public final class QueryCommand implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
+        try (JdbcSource src = JdbcSource.open(conn.resolve())) {
             QueryResult result = src.executeQuery(sql, limit, timeoutSec, writable);
             ObjectMapper mapper = JsonWriter.newMapper();
             byte[] body = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(result);
             writeBody(body);
             return ErrorCodes.OK.exitCode();
-        } catch (DataBridgeException e) {
-            emitError(e);
-            return e.code().exitCode();
         } catch (IOException e) {
-            emitError(new DataBridgeException(ErrorCodes.OUTPUT_WRITE_FAILED,
-                "failed to write result: " + e.getMessage(), null, e));
-            return ErrorCodes.OUTPUT_WRITE_FAILED.exitCode();
+            return CliErrors.report(new DataBridgeException(ErrorCodes.OUTPUT_WRITE_FAILED,
+                "failed to write result: " + e.getMessage(), null, e), verbose);
         } catch (RuntimeException e) {
-            emitError(new DataBridgeException(ErrorCodes.UNSPECIFIED,
-                e.getMessage(), null, e));
-            return ErrorCodes.UNSPECIFIED.exitCode();
+            return CliErrors.report(e, verbose);
         }
     }
 
@@ -82,24 +76,5 @@ public final class QueryCommand implements Callable<Integer> {
         }
     }
 
-    private void emitError(DataBridgeException e) {
-        StringBuilder sb = new StringBuilder("{\"error\":{\"code\":\"")
-            .append(e.code().wireName()).append("\",\"message\":\"")
-            .append(jsonEscape(UrlRedaction.redact(e.getMessage())))
-            .append("\"");
-        if (e.hint() != null) sb.append(",\"hint\":\"").append(jsonEscape(e.hint())).append("\"");
-        if (verbose && e.getCause() != null) {
-            sb.append(",\"cause\":\"")
-                .append(jsonEscape(e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage()))
-                .append("\"");
-        }
-        sb.append("}}");
-        System.err.println(sb);
-        if (verbose && e.getCause() != null) e.getCause().printStackTrace(System.err);
-    }
 
-    private static String jsonEscape(String s) {
-        if (s == null) return "";
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
-    }
 }

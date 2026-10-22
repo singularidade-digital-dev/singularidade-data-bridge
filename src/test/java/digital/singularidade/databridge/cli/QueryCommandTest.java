@@ -14,7 +14,7 @@ class QueryCommandTest {
             "--jdbc-url", "jdbc:postgresql://h/d",
             "--sql", "SELECT 1"
         );
-        assertThat(cmd.jdbcUrl).isEqualTo("jdbc:postgresql://h/d");
+        assertThat(cmd.conn.jdbcUrl()).isEqualTo("jdbc:postgresql://h/d");
         assertThat(cmd.sql).isEqualTo("SELECT 1");
         assertThat(cmd.limit).isEqualTo(100);
         assertThat(cmd.timeoutSec).isEqualTo(30);
