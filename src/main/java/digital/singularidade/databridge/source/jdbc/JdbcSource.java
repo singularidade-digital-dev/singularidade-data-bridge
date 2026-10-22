@@ -15,6 +15,7 @@ import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.TableInfo;
 import digital.singularidade.databridge.output.Trigger;
 import digital.singularidade.databridge.output.UniqueConstraint;
+import digital.singularidade.databridge.query.SqlGuard;
 import digital.singularidade.databridge.source.Source;
 import digital.singularidade.databridge.source.jdbc.firebird.FbTable;
 import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbCheck;
@@ -1100,22 +1101,9 @@ public final class JdbcSource implements Source {
     }
 
     // ================================================================================
-    //   QueryExecutor — defense-in-depth read-only by default; --writable opts in
-    //   for DML. DDL is rejected unconditionally. Multi-statement is rejected.
+    //   QueryExecutor — read-only by default; --writable opts in to DML. The statement
+    //   guard lives in SqlGuard; the read-only connection flag is the second layer.
     // ================================================================================
-
-    private static final Pattern MULTI_STMT_KEYWORD = Pattern.compile(
-        ";\\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|UPSERT|DROP|CREATE|ALTER|TRUNCATE|"
-        + "GRANT|REVOKE|VACUUM|ANALYZE|EXPLAIN|WITH|BEGIN|COMMIT|ROLLBACK|CALL)\\b",
-        Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern DDL_LEADING = Pattern.compile(
-        "^\\s*(DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE)\\b",
-        Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern READONLY_OK_LEADING = Pattern.compile(
-        "^\\s*(SELECT|WITH|EXPLAIN|SHOW)\\b",
-        Pattern.CASE_INSENSITIVE);
 
     @Override
     public QueryResult executeQuery(String sql, int limit, int timeoutSec, boolean writable) {
@@ -1128,24 +1116,8 @@ public final class JdbcSource implements Source {
                 "limit must be > 0 (got " + limit + ")",
                 "pass --limit 100 (or any positive value)");
         }
-        // Layer 2a: reject multi-statement attempts (defense against `; DROP TABLE` injection patterns)
-        if (MULTI_STMT_KEYWORD.matcher(sql).find()) {
-            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
-                "multi-statement queries are not allowed",
-                "submit one statement per call");
-        }
-        // Layer 2b: DDL is forbidden ALWAYS, even with --writable (use Liquibase/Flyway for schema changes)
-        if (DDL_LEADING.matcher(sql).find()) {
-            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
-                "DDL is not allowed (use Liquibase/Flyway for schema changes)",
-                null);
-        }
-        // Layer 2c: when not writable, only allow SELECT-shaped statements
-        if (!writable && !READONLY_OK_LEADING.matcher(sql).find()) {
-            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
-                "non-SELECT statement requires --writable",
-                "pass --writable to allow INSERT/UPDATE/DELETE; data-bridge never permits DDL");
-        }
+        // Layer 2: one allowlisted statement, checked on the blanked SQL (see SqlGuard)
+        String runnable = SqlGuard.check(sql, hints, writable);
 
         // Layer 1: read-only flag on the connection (Postgres etc. enforce; some drivers ignore)
         boolean wasReadOnly = false;
@@ -1168,7 +1140,7 @@ public final class JdbcSource implements Source {
                 // Ask for one more than the limit so we can distinguish "exactly N rows"
                 // from "more than N rows available" — the latter sets truncated=true.
                 st.setMaxRows(limit + 1);
-                boolean hasResultSet = st.execute(sql);
+                boolean hasResultSet = st.execute(runnable);
                 long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
                 if (hasResultSet) {
                     try (ResultSet rs = st.getResultSet()) {
