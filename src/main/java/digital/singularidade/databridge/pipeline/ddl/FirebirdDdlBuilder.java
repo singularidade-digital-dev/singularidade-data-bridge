@@ -1,337 +1,248 @@
 package digital.singularidade.databridge.pipeline.ddl;
 
-import digital.singularidade.databridge.error.DataBridgeException;
-import digital.singularidade.databridge.error.ErrorCodes;
+import digital.singularidade.databridge.output.SystemNames;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import digital.singularidade.databridge.source.jdbc.ServerVersion;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbCheck;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbColumn;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbDomain;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbForeignKey;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbIndex;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbKey;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbTrigger;
+import digital.singularidade.databridge.source.jdbc.firebird.FirebirdCatalog;
+import digital.singularidade.databridge.source.jdbc.firebird.FirebirdTypes;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
+/**
+ * Firebird DDL rendered from the catalog model ({@link FbTable}), in a fixed order: shared domains and
+ * sequences, CREATE TABLE (PK/UNIQUE inline), indexes, foreign keys, checks, comments. The script replays
+ * with {@code isql}; names the database generated (INTEG_n, RDB$...) are never written, so Firebird
+ * assigns fresh ones. {@code triggers.sql} is a {@code SET TERM} block with event, state and position.
+ */
 public final class FirebirdDdlBuilder implements DdlBuilder {
+
+    /** Rules worth writing; RESTRICT and NO ACTION are the default (and RESTRICT is not valid syntax). */
+    private static final Set<String> EXPLICIT_RULES = Set.of("CASCADE", "SET NULL", "SET DEFAULT");
 
     @Override
     public Optional<DdlScript> build(JdbcSource source, String schema, String table,
-                                      String redactedUrl, boolean includeTriggers) {
-        Connection c = source.connection();
+                                     String redactedUrl, boolean includeTriggers) {
+        FbTable t = source.firebirdTable(table);
         ServerVersion v = source.serverVersion();
-        List<String> warnings = new ArrayList<>();
         List<String> included = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
-        StringBuilder body = new StringBuilder();
+        List<String> sections = new ArrayList<>();
 
-        String tableUpper = table.toUpperCase();
-
-        // Determine VIEW vs TABLE via RDB$RELATIONS.RDB$RELATION_TYPE (FB 3+ uses RDB$VIEW_BLR != null for views)
-        String relType = fetchRelType(c, tableUpper);
-        if ("VIEW".equals(relType)) {
-            String viewSrc = fetchViewSource(c, tableUpper);
-            body.append("CREATE OR ALTER VIEW \"").append(tableUpper).append("\" AS\n").append(viewSrc).append(";\n");
+        List<String> shared = sharedObjects(t);
+        if (!shared.isEmpty()) {
+            sections.add("-- Shared objects used by this table (create once per database)\n"
+                + String.join("\n", shared));
+            included.add("CREATE DOMAIN / CREATE SEQUENCE (shared)");
+        }
+        if (t.view()) {
+            sections.add("CREATE OR ALTER VIEW " + q(t.name()) + " AS\n" + t.viewSource() + ";");
             included.add("CREATE VIEW");
         } else {
-            body.append(buildCreateTable(c, tableUpper)).append("\n");
+            sections.add(createTable(t));
             included.add("CREATE TABLE");
         }
+        addSection(sections, included, "CREATE INDEX", indexes(t));
+        addSection(sections, included, "FOREIGN KEY", foreignKeys(t));
+        addSection(sections, included, "CHECK", checks(t));
+        addSection(sections, included, "COMMENT ON", comments(t));
 
-        // Indexes (excluding PK-backing one)
-        List<String> indexDefs = fetchIndexDdl(c, tableUpper, v);
-        if (!indexDefs.isEmpty()) {
-            body.append('\n');
-            for (String d : indexDefs) body.append(d).append(";\n");
-            included.add("CREATE INDEX");
-        }
-
-        // Constraints (FK, CHECK; PK/UNIQUE inline in CREATE TABLE above)
-        List<String> consDefs = fetchAlterConstraints(c, tableUpper);
-        if (!consDefs.isEmpty()) {
-            body.append('\n');
-            for (String d : consDefs) body.append(d).append(";\n");
-            included.add("FK / CHECK constraints");
-        }
-
-        // Comments (RDB$DESCRIPTION on RDB$RELATIONS, RDB$RELATION_FIELDS)
-        List<String> comments = fetchComments(c, tableUpper);
-        if (!comments.isEmpty()) {
-            body.append('\n');
-            for (String d : comments) body.append(d).append(";\n");
-            included.add("COMMENT ON");
-        }
-
-        StringBuilder triggers = new StringBuilder();
+        String triggers = "";
         if (includeTriggers) {
-            List<String> trigs = fetchTriggers(c, tableUpper);
-            for (String t : trigs) triggers.append(t).append(";\n\n");
-            included.add(trigs.isEmpty() ? "TRIGGERS (none)" : "TRIGGERS");
+            triggers = triggers(t);
+            included.add(t.triggers().isEmpty() ? "TRIGGERS (none)" : "TRIGGERS");
         } else {
             skipped.add("triggers (use --include-triggers)");
         }
-
         skipped.add("GRANT/REVOKE");
-        skipped.add("autonomous generators (sequences) not used by tables");
+        skipped.add("generator values");
 
-        String header = DdlScript.standardHeader("firebird", null, table,
-            redactedUrl, v.banner(), included, skipped);
-        return Optional.of(new DdlScript(header, body.toString().stripTrailing(),
-            triggers.toString().stripTrailing(), warnings));
+        String header = DdlScript.standardHeader("firebird", null, table, redactedUrl, v.banner(),
+            included, skipped) + "\n-- Database default character set: " + t.databaseCharset();
+        return Optional.of(new DdlScript(header, String.join("\n\n", sections), triggers, List.of()));
     }
 
-    private String fetchRelType(Connection c, String tableUpper) {
-        String sql = "SELECT CASE WHEN RDB$VIEW_SOURCE IS NOT NULL THEN 'VIEW' ELSE 'TABLE' END "
-                  + "FROM RDB$RELATIONS WHERE TRIM(RDB$RELATION_NAME) = ?";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : "TABLE";
-            }
-        } catch (SQLException e) {
-            return "TABLE";
-        }
+    private static void addSection(List<String> sections, List<String> included, String label,
+                                   List<String> statements) {
+        if (statements.isEmpty()) return;
+        sections.add(String.join("\n", statements));
+        included.add(label);
     }
 
-    private String fetchViewSource(Connection c, String tableUpper) {
-        String sql = "SELECT RDB$VIEW_SOURCE FROM RDB$RELATIONS WHERE TRIM(RDB$RELATION_NAME) = ?";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1).trim() : "";
+    private static List<String> sharedObjects(FbTable t) {
+        List<String> out = new ArrayList<>();
+        for (FbDomain d : t.domains()) {
+            StringBuilder sb = new StringBuilder("CREATE DOMAIN ").append(q(d.name())).append(" AS ")
+                .append(d.nativeType());
+            if (d.charset() != null && !d.charset().equals(t.databaseCharset())) {
+                sb.append(" CHARACTER SET ").append(d.charset());
             }
-        } catch (SQLException e) {
-            return "";
+            if (d.defaultValue() != null) sb.append(" DEFAULT ").append(d.defaultValue());
+            if (d.notNull()) sb.append(" NOT NULL");
+            if (d.checkSource() != null) sb.append(' ').append(d.checkSource());
+            if (d.collation() != null && !d.collation().equals(d.charsetDefaultCollation())) {
+                sb.append(" COLLATE ").append(d.collation());
+            }
+            out.add(sb.append(';').toString());
         }
+        for (String g : t.triggerGenerators()) out.add("CREATE SEQUENCE " + q(g) + ";");
+        return out;
     }
 
-    private String buildCreateTable(Connection c, String tableUpper) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("CREATE TABLE \"").append(tableUpper).append("\" (\n");
+    private static String createTable(FbTable t) {
+        List<String> lines = new ArrayList<>();
+        for (FbColumn c : t.columns()) lines.add("    " + column(t, c));
+        if (t.primaryKey() != null) lines.add("    " + key(t.primaryKey(), "PRIMARY KEY"));
+        for (FbKey u : t.uniques()) lines.add("    " + key(u, "UNIQUE"));
+        return "CREATE TABLE " + q(t.name()) + " (\n" + String.join(",\n", lines) + "\n);";
+    }
 
-        String sql = """
-            SELECT TRIM(rf.RDB$FIELD_NAME) AS col_name,
-                   f.RDB$FIELD_TYPE, f.RDB$FIELD_SUB_TYPE, f.RDB$FIELD_LENGTH,
-                   f.RDB$FIELD_PRECISION, f.RDB$FIELD_SCALE,
-                   rf.RDB$NULL_FLAG, rf.RDB$DEFAULT_SOURCE, rf.RDB$IDENTITY_TYPE
-              FROM RDB$RELATION_FIELDS rf
-              JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
-             WHERE TRIM(rf.RDB$RELATION_NAME) = ?
-             ORDER BY rf.RDB$FIELD_POSITION
-            """;
-        boolean first = true;
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    if (!first) sb.append(",\n");
-                    first = false;
-                    sb.append("    \"").append(rs.getString("col_name")).append("\" ");
-                    sb.append(fbType(rs));
-                    String defSrc = rs.getString("RDB$DEFAULT_SOURCE");
-                    if (defSrc != null && !defSrc.isBlank()) sb.append(' ').append(defSrc.trim());
-                    Integer ident = rs.getObject("RDB$IDENTITY_TYPE") == null ? null : rs.getInt("RDB$IDENTITY_TYPE");
-                    if (ident != null) sb.append(ident == 0 ? " GENERATED ALWAYS AS IDENTITY" : " GENERATED BY DEFAULT AS IDENTITY");
-                    Integer notNull = rs.getObject("RDB$NULL_FLAG") == null ? null : rs.getInt("RDB$NULL_FLAG");
-                    if (notNull != null && notNull == 1) sb.append(" NOT NULL");
-                }
-            }
-        } catch (SQLException e) {
-            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
-                "build CREATE TABLE (FB) failed: " + e.getMessage(), null, e);
+    private static String column(FbTable t, FbColumn c) {
+        StringBuilder sb = new StringBuilder(q(c.name())).append(' ');
+        if (c.computedSource() != null) {
+            String src = c.computedSource();
+            return sb.append("COMPUTED BY ").append(src.startsWith("(") ? src : "(" + src + ")").toString();
         }
-
-        // Inline PK + UNIQUE
-        String inlSql = """
-            SELECT TRIM(rc.RDB$CONSTRAINT_NAME) AS cname,
-                   TRIM(rc.RDB$CONSTRAINT_TYPE) AS ctype,
-                   LIST(TRIM(seg.RDB$FIELD_NAME)) AS cols
-              FROM RDB$RELATION_CONSTRAINTS rc
-              JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = rc.RDB$INDEX_NAME
-             WHERE TRIM(rc.RDB$RELATION_NAME) = ?
-               AND TRIM(rc.RDB$CONSTRAINT_TYPE) IN ('PRIMARY KEY', 'UNIQUE')
-             GROUP BY rc.RDB$CONSTRAINT_NAME, rc.RDB$CONSTRAINT_TYPE
-            """;
-        try (PreparedStatement ps = c.prepareStatement(inlSql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    sb.append(",\n    CONSTRAINT \"").append(rs.getString("cname")).append("\" ")
-                      .append(rs.getString("ctype")).append(" (").append(rs.getString("cols")).append(")");
-                }
-            }
-        } catch (SQLException e) {
-            // FB earlier than 5 may not have LIST aggregate — fallback to per-segment loop omitted for brevity
+        if (c.domainName() != null) {
+            sb.append(q(c.domainName()));
+            if (c.columnDefault() != null) sb.append(" DEFAULT ").append(c.columnDefault());
+            if (c.columnNotNull()) sb.append(" NOT NULL");
+            if (c.columnCollation() != null) sb.append(" COLLATE ").append(c.columnCollation());
+            return sb.toString();
         }
-
-        sb.append("\n);");
+        sb.append(c.nativeType());
+        boolean text = FirebirdTypes.isText(c.type());
+        if (text && c.charset() != null && !c.charset().equals(t.databaseCharset())) {
+            sb.append(" CHARACTER SET ").append(c.charset());
+        }
+        if (c.identityType() != null) {
+            sb.append(c.identityType() == 0 ? " GENERATED ALWAYS AS IDENTITY" : " GENERATED BY DEFAULT AS IDENTITY");
+        }
+        if (c.columnDefault() != null) sb.append(" DEFAULT ").append(c.columnDefault());
+        if (c.columnNotNull()) sb.append(" NOT NULL");
+        if (text && c.collation() != null && !c.collation().equals(c.charsetDefaultCollation())) {
+            sb.append(" COLLATE ").append(c.collation());
+        }
         return sb.toString();
     }
 
-    private static String fbType(ResultSet rs) throws SQLException {
-        int t = rs.getInt("RDB$FIELD_TYPE");
-        Integer sub = rs.getObject("RDB$FIELD_SUB_TYPE") == null ? null : rs.getInt("RDB$FIELD_SUB_TYPE");
-        Integer len = rs.getObject("RDB$FIELD_LENGTH") == null ? null : rs.getInt("RDB$FIELD_LENGTH");
-        Integer prec = rs.getObject("RDB$FIELD_PRECISION") == null ? null : rs.getInt("RDB$FIELD_PRECISION");
-        Integer scale = rs.getObject("RDB$FIELD_SCALE") == null ? null : rs.getInt("RDB$FIELD_SCALE");
-        // Common FB type codes (NOT exhaustive — covers MVP):
-        return switch (t) {
-            case 7 -> "SMALLINT";
-            case 8 -> "INTEGER";
-            case 16 -> "BIGINT";
-            case 10 -> "FLOAT";
-            case 27 -> "DOUBLE PRECISION";
-            case 12 -> "DATE";
-            case 13 -> "TIME";
-            case 35 -> "TIMESTAMP";
-            case 37 -> len != null ? "VARCHAR(" + len + ")" : "VARCHAR";
-            case 14 -> len != null ? "CHAR(" + len + ")" : "CHAR";
-            case 23 -> "BOOLEAN";
-            case 261 -> {
-                if (sub != null && sub == 1) yield "BLOB SUB_TYPE TEXT";
-                yield "BLOB";
-            }
-            default -> "/* unknown_fb_type=" + t + " */ VARCHAR";
-        };
+    private static String key(FbKey k, String kind) {
+        return constraintPrefix(k.name()) + kind + " (" + columnList(k.columns()) + ")"
+            + usingIndex(k.name(), k.indexName(), k.descending());
     }
 
-    private List<String> fetchIndexDdl(Connection c, String tableUpper, ServerVersion v) {
+    private static List<String> indexes(FbTable t) {
         List<String> out = new ArrayList<>();
-        // Skip indices that back PK or UNIQUE constraints
-        String sql = """
-            SELECT TRIM(i.RDB$INDEX_NAME) AS idx_name, COALESCE(i.RDB$UNIQUE_FLAG, 0) AS uniq,
-                   LIST(TRIM(seg.RDB$FIELD_NAME), ', ') AS cols
-              FROM RDB$INDICES i
-              JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = i.RDB$INDEX_NAME
-             WHERE TRIM(i.RDB$RELATION_NAME) = ?
-               AND COALESCE(i.RDB$INDEX_INACTIVE, 0) = 0
-               AND NOT EXISTS (
-                 SELECT 1 FROM RDB$RELATION_CONSTRAINTS rc
-                  WHERE rc.RDB$INDEX_NAME = i.RDB$INDEX_NAME
-                    AND TRIM(rc.RDB$CONSTRAINT_TYPE) IN ('PRIMARY KEY','UNIQUE'))
-             GROUP BY i.RDB$INDEX_NAME, i.RDB$UNIQUE_FLAG
-            """;
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String unique = rs.getInt("uniq") == 1 ? "UNIQUE " : "";
-                    out.add("CREATE " + unique + "INDEX \"" + rs.getString("idx_name")
-                        + "\" ON \"" + tableUpper + "\" (" + rs.getString("cols") + ")");
-                }
+        for (FbIndex i : t.indexes()) {
+            if (i.constraintName() != null) continue;   // created by its PK/UNIQUE/FK
+            StringBuilder sb = new StringBuilder("CREATE ");
+            if (i.unique()) sb.append("UNIQUE ");
+            if (i.descending()) sb.append("DESCENDING ");
+            sb.append("INDEX ").append(q(i.name())).append(" ON ").append(q(t.name()));
+            if (i.expression() != null) {
+                String e = i.expression();
+                sb.append(" COMPUTED BY ").append(e.startsWith("(") ? e : "(" + e + ")");
+            } else {
+                sb.append(" (").append(columnList(i.columns())).append(')');
             }
-        } catch (SQLException e) {
-            // LIST aggregate may be absent on older FB — fallback omitted for brevity
+            out.add(sb.append(';').toString());
+            if (!i.active()) out.add("ALTER INDEX " + q(i.name()) + " INACTIVE;");
         }
         return out;
     }
 
-    private List<String> fetchAlterConstraints(Connection c, String tableUpper) {
+    private static List<String> foreignKeys(FbTable t) {
+        List<FbForeignKey> fks = new ArrayList<>(t.foreignKeys());
+        fks.sort(Comparator.comparing(FbForeignKey::refTable)
+            .thenComparing(f -> String.join(",", f.columns())));
         List<String> out = new ArrayList<>();
-        // FK
-        String fkSql = """
-            SELECT TRIM(rc.RDB$CONSTRAINT_NAME) AS cname,
-                   LIST(TRIM(seg.RDB$FIELD_NAME), ', ') AS cols,
-                   TRIM(MAX(refrc.RDB$RELATION_NAME)) AS ref_table,
-                   LIST(TRIM(refseg.RDB$FIELD_NAME), ', ') AS ref_cols,
-                   TRIM(MAX(refc.RDB$UPDATE_RULE)) AS upd_rule,
-                   TRIM(MAX(refc.RDB$DELETE_RULE)) AS del_rule
-              FROM RDB$RELATION_CONSTRAINTS rc
-              JOIN RDB$REF_CONSTRAINTS refc ON refc.RDB$CONSTRAINT_NAME = rc.RDB$CONSTRAINT_NAME
-              JOIN RDB$RELATION_CONSTRAINTS refrc ON refrc.RDB$CONSTRAINT_NAME = refc.RDB$CONST_NAME_UQ
-              JOIN RDB$INDEX_SEGMENTS seg ON seg.RDB$INDEX_NAME = rc.RDB$INDEX_NAME
-              JOIN RDB$INDEX_SEGMENTS refseg ON refseg.RDB$INDEX_NAME = refrc.RDB$INDEX_NAME
-                AND refseg.RDB$FIELD_POSITION = seg.RDB$FIELD_POSITION
-             WHERE TRIM(rc.RDB$RELATION_NAME) = ?
-               AND TRIM(rc.RDB$CONSTRAINT_TYPE) = 'FOREIGN KEY'
-             GROUP BY rc.RDB$CONSTRAINT_NAME
-            """;
-        try (PreparedStatement ps = c.prepareStatement(fkSql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    out.add("ALTER TABLE \"" + tableUpper + "\" ADD CONSTRAINT \""
-                        + rs.getString("cname") + "\" FOREIGN KEY (" + rs.getString("cols")
-                        + ") REFERENCES \"" + rs.getString("ref_table") + "\" ("
-                        + rs.getString("ref_cols") + ") ON UPDATE " + rs.getString("upd_rule")
-                        + " ON DELETE " + rs.getString("del_rule"));
-                }
-            }
-        } catch (SQLException e) { /* skip */ }
-
-        // CHECK
-        String chkSql = """
-            SELECT TRIM(rc.RDB$CONSTRAINT_NAME) AS cname, tr.RDB$TRIGGER_SOURCE AS src
-              FROM RDB$RELATION_CONSTRAINTS rc
-              JOIN RDB$CHECK_CONSTRAINTS cc ON cc.RDB$CONSTRAINT_NAME = rc.RDB$CONSTRAINT_NAME
-              JOIN RDB$TRIGGERS tr ON tr.RDB$TRIGGER_NAME = cc.RDB$TRIGGER_NAME
-             WHERE TRIM(rc.RDB$RELATION_NAME) = ?
-               AND TRIM(rc.RDB$CONSTRAINT_TYPE) = 'CHECK'
-               AND tr.RDB$TRIGGER_TYPE = 1
-            """;
-        try (PreparedStatement ps = c.prepareStatement(chkSql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String src = rs.getString("src");
-                    if (src != null) src = src.trim();
-                    out.add("ALTER TABLE \"" + tableUpper + "\" ADD CONSTRAINT \""
-                        + rs.getString("cname") + "\" " + src);
-                }
-            }
-        } catch (SQLException e) { /* skip */ }
+        for (FbForeignKey f : fks) {
+            StringBuilder sb = new StringBuilder("ALTER TABLE ").append(q(t.name())).append(" ADD ")
+                .append(constraintPrefix(f.name())).append("FOREIGN KEY (").append(columnList(f.columns()))
+                .append(") REFERENCES ").append(q(f.refTable())).append(" (").append(columnList(f.refColumns()))
+                .append(')');
+            if (EXPLICIT_RULES.contains(f.deleteRule())) sb.append(" ON DELETE ").append(f.deleteRule());
+            if (EXPLICIT_RULES.contains(f.updateRule())) sb.append(" ON UPDATE ").append(f.updateRule());
+            sb.append(usingIndex(f.name(), f.indexName(), f.descending()));
+            out.add(sb.append(';').toString());
+        }
         return out;
     }
 
-    private List<String> fetchComments(Connection c, String tableUpper) {
+    private static List<String> checks(FbTable t) {
+        List<FbCheck> checks = new ArrayList<>(t.checks());
+        checks.sort(Comparator.comparing(c -> c.source() == null ? "" : c.source()));
         List<String> out = new ArrayList<>();
-        // Table description
-        try (PreparedStatement ps = c.prepareStatement(
-            "SELECT RDB$DESCRIPTION FROM RDB$RELATIONS WHERE TRIM(RDB$RELATION_NAME) = ?")) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    String d = rs.getString(1);
-                    if (d != null && !d.isBlank())
-                        out.add("COMMENT ON TABLE \"" + tableUpper + "\" IS '" + d.replace("'","''") + "'");
-                }
-            }
-        } catch (SQLException ignored) {}
-        // Column descriptions
-        try (PreparedStatement ps = c.prepareStatement(
-            "SELECT TRIM(RDB$FIELD_NAME) AS col, RDB$DESCRIPTION AS d "
-          + "FROM RDB$RELATION_FIELDS WHERE TRIM(RDB$RELATION_NAME) = ? AND RDB$DESCRIPTION IS NOT NULL")) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    out.add("COMMENT ON COLUMN \"" + tableUpper + "\".\"" + rs.getString("col")
-                        + "\" IS '" + rs.getString("d").replace("'","''") + "'");
-                }
-            }
-        } catch (SQLException ignored) {}
+        for (FbCheck c : checks) {
+            if (c.source() == null) continue;
+            String expr = FirebirdCatalog.stripKeyword(c.source(), "CHECK");
+            out.add("ALTER TABLE " + q(t.name()) + " ADD " + constraintPrefix(c.name()) + "CHECK " + expr + ";");
+        }
         return out;
     }
 
-    private List<String> fetchTriggers(Connection c, String tableUpper) {
+    private static List<String> comments(FbTable t) {
         List<String> out = new ArrayList<>();
-        String sql = """
-            SELECT TRIM(RDB$TRIGGER_NAME) AS tname, RDB$TRIGGER_SOURCE AS src,
-                   RDB$TRIGGER_TYPE AS ttype
-              FROM RDB$TRIGGERS
-             WHERE TRIM(RDB$RELATION_NAME) = ?
-               AND COALESCE(RDB$SYSTEM_FLAG, 0) = 0
-            """;
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, tableUpper);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String src = rs.getString("src");
-                    if (src == null) continue;
-                    out.add("CREATE OR ALTER TRIGGER \"" + rs.getString("tname")
-                        + "\" FOR \"" + tableUpper + "\"\n" + src.trim());
-                }
-            }
-        } catch (SQLException ignored) {}
+        if (t.description() != null) {
+            out.add("COMMENT ON TABLE " + q(t.name()) + " IS " + literal(t.description()) + ";");
+        }
+        for (FbColumn c : t.columns()) {
+            if (c.description() == null) continue;
+            out.add("COMMENT ON COLUMN " + q(t.name()) + "." + q(c.name()) + " IS " + literal(c.description()) + ";");
+        }
         return out;
+    }
+
+    private static String triggers(FbTable t) {
+        if (t.triggers().isEmpty()) return "";
+        List<String> blocks = new ArrayList<>();
+        for (FbTrigger tr : t.triggers()) {
+            if (tr.body() == null) continue;
+            blocks.add("CREATE OR ALTER TRIGGER " + q(tr.name()) + " FOR " + q(t.name())
+                + (tr.active() ? " ACTIVE " : " INACTIVE ") + tr.timing() + " " + String.join(" OR ", tr.events())
+                + " POSITION " + tr.position() + "\n" + tr.body() + "^");
+        }
+        if (blocks.isEmpty()) return "";
+        return "SET TERM ^ ;\n\n" + String.join("\n\n", blocks) + "\n\nSET TERM ; ^";
+    }
+
+    private static String constraintPrefix(String name) {
+        return name == null || SystemNames.isSystemGenerated(name) ? "" : "CONSTRAINT " + q(name) + " ";
+    }
+
+    /**
+     * {@code USING [DESC] INDEX name} only when the backing index is descending or named apart from the
+     * constraint (Firebird requires the name in this clause, so a descending index keeps its own).
+     */
+    private static String usingIndex(String constraint, String index, boolean descending) {
+        if (index == null) return "";
+        boolean customName = !SystemNames.isSystemGenerated(index) && !index.equals(constraint);
+        if (!customName && !descending) return "";
+        return " USING " + (descending ? "DESC " : "") + "INDEX " + q(index);
+    }
+
+    private static String columnList(List<String> columns) {
+        List<String> quoted = new ArrayList<>(columns.size());
+        for (String c : columns) quoted.add(q(c));
+        return String.join(", ", quoted);
+    }
+
+    private static String q(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String literal(String text) {
+        return "'" + text.replace("'", "''") + "'";
     }
 }
