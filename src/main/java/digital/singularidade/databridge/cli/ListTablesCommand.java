@@ -24,7 +24,9 @@ public final class ListTablesCommand implements Callable<Integer> {
             src.requireSchema(schema);
             List<String> tables = src.listTables(schema);
             ObjectMapper mapper = JsonWriter.newMapper();
-            System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(tables));
+            System.out.write(mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(tables));
+            System.out.write('\n');
+            System.out.flush();
             return ErrorCodes.OK.exitCode();
         } catch (Exception e) {
             return CliErrors.report(e, verbose);

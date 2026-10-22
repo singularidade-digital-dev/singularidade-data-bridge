@@ -28,6 +28,7 @@ import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbKey;
 import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbTrigger;
 import digital.singularidade.databridge.source.jdbc.firebird.FirebirdCatalog;
 import digital.singularidade.databridge.source.jdbc.firebird.FirebirdTypes;
+import digital.singularidade.databridge.source.jdbc.firebird.NoneText;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -55,6 +56,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
@@ -62,9 +64,15 @@ import java.util.regex.Pattern;
 
 public final class JdbcSource implements Source {
 
+    private static final Pattern FIREBIRD_CHARSET_PARAM =
+        Pattern.compile("(?i)[?&;](encoding|lc_ctype|charset|localencoding)=([^&;]*)");
+
     private final Connection connection;
     private final DriverHints hints;
     private final ServerVersion version;
+    private final NoneText noneText;
+    /** Firebird over a UTF8 connection: NONE text that is not valid UTF-8 is decoded by {@link NoneText}. */
+    private final boolean decodeNoneText;
     private final Map<String, List<String>> pkCache = new HashMap<>();
     private final Map<String, PgClassInfo> pgClassCache = new HashMap<>();
     private final Map<String, Map<String, PgStatsEntry>> pgStatsCache = new HashMap<>();
@@ -75,10 +83,13 @@ public final class JdbcSource implements Source {
 
     private record PgStatsEntry(double nDistinct, double nullFrac, String mcvText, String mcfText, double correlation) {}
 
-    private JdbcSource(Connection connection, DriverHints hints, ServerVersion version) {
+    private JdbcSource(Connection connection, DriverHints hints, ServerVersion version,
+                       NoneText noneText, boolean decodeNoneText) {
         this.connection = connection;
         this.hints = hints;
         this.version = version;
+        this.noneText = noneText;
+        this.decodeNoneText = decodeNoneText;
     }
 
     public static JdbcSource open(String jdbcUrl) {
@@ -88,8 +99,11 @@ public final class JdbcSource implements Source {
     public static JdbcSource open(ConnectionSettings settings) {
         DriverHints hints = DriverHints.fromUrl(settings.url());
         String urlWithAppName = withApplicationName(settings.url(), hints);
+        Properties props = connectionProperties(hints, settings);
+        NoneText noneText = NoneText.of(settings.noneCharset());
+        boolean decodeNoneText = hints == DriverHints.FIREBIRD && isUtf8(firebirdCharset(settings.url(), props));
         try {
-            Connection c = DriverManager.getConnection(urlWithAppName, settings.toProperties());
+            Connection c = DriverManager.getConnection(urlWithAppName, props);
             c.setReadOnly(true);
             ServerVersion version = detectServerVersion(c, hints);
             if (hints == DriverHints.PG) {
@@ -100,7 +114,7 @@ public final class JdbcSource implements Source {
                     // setReadOnly(true) above is the more important guard.
                 }
             }
-            return new JdbcSource(c, hints, version);
+            return new JdbcSource(c, hints, version, noneText, decodeNoneText);
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.CONNECTION_FAILED,
                 "Failed to connect: " + e.getMessage(),
@@ -216,7 +230,33 @@ public final class JdbcSource implements Source {
         try { c.setReadOnly(true); } catch (SQLException ignored) {}
         ServerVersion v;
         try { v = detectServerVersion(c, hints); } catch (Exception e) { v = ServerVersion.UNKNOWN; }
-        return new JdbcSource(c, hints, v);
+        return new JdbcSource(c, hints, v, NoneText.of(NoneText.DEFAULT_FALLBACK), false);
+    }
+
+    /**
+     * Driver properties for a connection. A Firebird URL without a connection character set gets
+     * {@code encoding=UTF8}: without one Jaybird decodes text with the JVM's default charset, so the
+     * output would depend on the machine.
+     */
+    static Properties connectionProperties(DriverHints hints, ConnectionSettings settings) {
+        Properties p = settings.toProperties();
+        if (hints == DriverHints.FIREBIRD && !FIREBIRD_CHARSET_PARAM.matcher(settings.url()).find()
+                && !p.containsKey("encoding") && !p.containsKey("charSet")) {
+            p.setProperty("encoding", "UTF8");
+        }
+        return p;
+    }
+
+    /** The connection character set a Firebird URL ends up with, as given (Firebird or Java name). */
+    private static String firebirdCharset(String url, Properties props) {
+        Matcher m = FIREBIRD_CHARSET_PARAM.matcher(url);
+        if (m.find()) return m.group(2);
+        return props.getProperty("encoding", props.getProperty("charSet", "NONE"));
+    }
+
+    private static boolean isUtf8(String charset) {
+        return "UTF8".equalsIgnoreCase(charset) || "UTF-8".equalsIgnoreCase(charset)
+            || "UNICODE_FSS".equalsIgnoreCase(charset);
     }
 
     public Connection connection() { return connection; }
@@ -822,6 +862,7 @@ public final class JdbcSource implements Source {
     }
 
     private Object readColumnValue(ResultSet rs, int idx, int jdbcType) throws SQLException {
+        if (decodeNoneText && isText(jdbcType)) return readFirebirdText(rs, idx);
         if (jdbcType == Types.BLOB
             || jdbcType == Types.BINARY
             || jdbcType == Types.VARBINARY
@@ -841,6 +882,24 @@ public final class JdbcSource implements Source {
         if (obj instanceof Date d) return d.toLocalDate().toString();
         if (obj instanceof Time t) return t.toLocalTime().toString();
         return obj;
+    }
+
+    /**
+     * Over a UTF8 connection Firebird sends typed text as UTF-8 and NONE text as stored. Jaybird marks
+     * stored bytes that are not UTF-8 with U+FFFD; only then the raw bytes are re-read and decoded with the
+     * documented rule (UTF-8 if valid, else the {@code --none-charset} fallback).
+     */
+    private String readFirebirdText(ResultSet rs, int idx) throws SQLException {
+        String s = rs.getString(idx);
+        if (s == null || s.indexOf('\uFFFD') < 0) return s;
+        byte[] raw = rs.getBytes(idx);
+        return raw == null ? s : noneText.decode(raw);
+    }
+
+    private static boolean isText(int jdbcType) {
+        return jdbcType == Types.CHAR || jdbcType == Types.VARCHAR || jdbcType == Types.LONGVARCHAR
+            || jdbcType == Types.NCHAR || jdbcType == Types.NVARCHAR || jdbcType == Types.LONGNVARCHAR
+            || jdbcType == Types.CLOB || jdbcType == Types.NCLOB;
     }
 
     private String quoteIdent(String ident) {

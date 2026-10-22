@@ -16,7 +16,7 @@ public final class QueryResultWriter {
         byte[] body = JsonWriter.newMapper().writerWithDefaultPrettyPrinter().writeValueAsBytes(result);
         if (outFile == null || outFile.equals("-")) {
             System.out.write(body);
-            System.out.println();
+            System.out.write('\n');
             System.out.flush();
             return;
         }

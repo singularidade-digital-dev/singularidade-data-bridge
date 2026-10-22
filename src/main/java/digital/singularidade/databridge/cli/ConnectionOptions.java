@@ -3,6 +3,7 @@ package digital.singularidade.databridge.cli;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
 import digital.singularidade.databridge.source.jdbc.ConnectionSettings;
+import digital.singularidade.databridge.source.jdbc.firebird.NoneText;
 import picocli.CommandLine.Option;
 
 import java.io.IOException;
@@ -39,6 +40,11 @@ public final class ConnectionOptions {
             description = "Read the password from this file (a final line break is ignored).")
     Path passwordFile;
 
+    @Option(names = "--none-charset", paramLabel = "CHARSET", defaultValue = NoneText.DEFAULT_FALLBACK,
+            description = "Firebird: charset for CHARACTER SET NONE text that is not valid UTF-8 "
+                        + "(Firebird or Java name). Default WIN1252.")
+    String noneCharset = NoneText.DEFAULT_FALLBACK;
+
     public String jdbcUrl() {
         return jdbcUrl;
     }
@@ -67,7 +73,13 @@ public final class ConnectionOptions {
         } else if (passwordFile != null) {
             password = readPasswordFile(passwordFile);
         }
-        return new ConnectionSettings(jdbcUrl, user, password);
+        try {
+            NoneText.of(noneCharset);
+        } catch (IllegalArgumentException e) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS, "--none-charset: " + e.getMessage(),
+                "Use a Firebird name (WIN1252, ISO8859_1, DOS850, ...) or a Java charset name");
+        }
+        return new ConnectionSettings(jdbcUrl, user, password, noneCharset);
     }
 
     private static String readPasswordFile(Path file) {

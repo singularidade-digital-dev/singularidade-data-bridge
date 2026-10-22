@@ -11,7 +11,9 @@ on:
         type: string
 
 permissions:
-  contents: write   # required to create the tag and the GitHub Release
+  contents: write       # create the tag and the GitHub Release
+  id-token: write       # sign the build-provenance and SBOM attestations (Sigstore)
+  attestations: write   # store the attestations on the repository
 
 jobs:
   release:
@@ -85,9 +87,25 @@ jobs:
           mkdir -p release
           cp target/data-bridge.jar "release/data-bridge-${TAG}.jar"
           cp target/data-bridge-catalog.jar "release/data-bridge-catalog-${TAG}.jar"
+          cp target/bom.json "release/data-bridge-${TAG}.cdx.json"
           ( cd release && sha256sum "data-bridge-${TAG}.jar" > "data-bridge-${TAG}.jar.sha256" \
                        && sha256sum "data-bridge-catalog-${TAG}.jar" > "data-bridge-catalog-${TAG}.jar.sha256" )
           ls -la release/
+
+      - name: Attest build provenance (both JARs)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release/data-bridge-${{ steps.tag.outputs.tag }}.jar
+            release/data-bridge-catalog-${{ steps.tag.outputs.tag }}.jar
+
+      - name: Attest the SBOM (both JARs)
+        uses: actions/attest-sbom@v4
+        with:
+          subject-path: |
+            release/data-bridge-${{ steps.tag.outputs.tag }}.jar
+            release/data-bridge-catalog-${{ steps.tag.outputs.tag }}.jar
+          sbom-path: release/data-bridge-${{ steps.tag.outputs.tag }}.cdx.json
 
       - name: Create GitHub Release
         env:
@@ -100,4 +118,5 @@ jobs:
             "release/data-bridge-${TAG}.jar" \
             "release/data-bridge-${TAG}.jar.sha256" \
             "release/data-bridge-catalog-${TAG}.jar" \
-            "release/data-bridge-catalog-${TAG}.jar.sha256"
+            "release/data-bridge-catalog-${TAG}.jar.sha256" \
+            "release/data-bridge-${TAG}.cdx.json"

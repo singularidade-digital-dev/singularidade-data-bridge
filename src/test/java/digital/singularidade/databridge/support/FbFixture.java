@@ -43,6 +43,7 @@ public final class FbFixture implements AutoCloseable {
 
     private final GenericContainer<?> container;
     private final AtomicInteger scriptCounter = new AtomicInteger();
+    private boolean mixedCreated;
 
     public FbFixture() {
         this(IMAGE_FB3);
@@ -70,6 +71,40 @@ public final class FbFixture implements AutoCloseable {
 
     public String jdbcUrl(String dbFile) {
         return jdbcUrlWithoutCredentials(dbFile) + "&user=" + USER + "&password=" + PASSWORD;
+    }
+
+    /** Credentials inline but no connection character set: data-bridge's own default applies. */
+    public String jdbcUrlWithoutEncoding(String dbFile) {
+        return "jdbc:firebirdsql://" + container.getHost() + ":" + container.getMappedPort(FB_PORT)
+             + "/" + DB_DIR + "/" + dbFile + "?user=" + USER + "&password=" + PASSWORD;
+    }
+
+    /**
+     * Scratch database like SGH's: default character set NONE, one table whose NONE columns hold the same
+     * text in WIN1252 (row 1) and UTF-8 (row 2), plus typed WIN1252 / ISO8859_1 columns and an accented
+     * column comment. Created once per fixture.
+     */
+    public String mixedEncodingDatabase() {
+        if (!mixedCreated) {
+            IsqlResult r = isqlWithoutDatabase("""
+                SET SQL DIALECT 3;
+                SET NAMES UTF8;
+                CREATE DATABASE '%s/mixed.fdb' USER '%s' PASSWORD '%s' DEFAULT CHARACTER SET NONE;
+                CREATE TABLE TMIX (ID INTEGER NOT NULL PRIMARY KEY, D VARCHAR(40) CHARACTER SET NONE,
+                  B BLOB SUB_TYPE TEXT CHARACTER SET NONE, C CHAR(3) CHARACTER SET NONE,
+                  W VARCHAR(10) CHARACTER SET WIN1252, F CHAR(1) CHARACTER SET ISO8859_1);
+                COMMENT ON COLUMN TMIX.D IS 'Descrição com acento';
+                INSERT INTO TMIX VALUES (1, CAST(x'61E7E36F2091789220E9' AS VARCHAR(40) CHARACTER SET NONE),
+                  CAST(x'61E7E36F' AS BLOB SUB_TYPE TEXT CHARACTER SET NONE),
+                  CAST(x'E76161' AS CHAR(3) CHARACTER SET NONE), 'ação', 'T');
+                INSERT INTO TMIX VALUES (2, CAST(x'61C3A7C3A36F20E2809878E2809920C3A9' AS VARCHAR(40) CHARACTER SET NONE),
+                  CAST(x'61C3A7C3A36F' AS BLOB SUB_TYPE TEXT CHARACTER SET NONE), 'abc', 'é', 'F');
+                COMMIT;
+                """.formatted(DB_DIR, USER, PASSWORD));
+            if (r.exitCode() != 0) throw new IllegalStateException("mixed.fdb bootstrap failed:\n" + r.output());
+            mixedCreated = true;
+        }
+        return "mixed.fdb";
     }
 
     public String jdbcUrlWithoutCredentials() {

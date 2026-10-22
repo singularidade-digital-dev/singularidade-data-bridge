@@ -45,6 +45,7 @@
         <surefire.plugin.version>3.5.2</surefire.plugin.version>
         <failsafe.plugin.version>3.5.2</failsafe.plugin.version>
         <shade.plugin.version>3.6.0</shade.plugin.version>
+        <cyclonedx.plugin.version>2.9.3</cyclonedx.plugin.version>
     </properties>
 
     <dependencies>
@@ -186,6 +187,25 @@
                     <systemPropertyVariables>
                         <api.version>1.41</api.version>
                     </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <!-- SBOM (CycloneDX JSON) of what the JARs ship: compile + runtime dependencies only. -->
+            <plugin>
+                <groupId>org.cyclonedx</groupId>
+                <artifactId>cyclonedx-maven-plugin</artifactId>
+                <version>${cyclonedx.plugin.version}</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>makeBom</goal></goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <outputFormat>json</outputFormat>
+                    <outputName>bom</outputName>
+                    <includeTestScope>false</includeTestScope>
+                    <includeProvidedScope>false</includeProvidedScope>
+                    <includeSystemScope>false</includeSystemScope>
                 </configuration>
             </plugin>
             <plugin>

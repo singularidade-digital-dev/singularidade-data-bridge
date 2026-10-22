@@ -72,6 +72,12 @@ jobs:
               exit 1
           fi
 
+      - name: Check the SBOM
+        run: |
+          test -s target/bom.json
+          grep -q '"bomFormat" : "CycloneDX"\|"bomFormat":"CycloneDX"' target/bom.json
+          grep -q 'jaybird' target/bom.json
+
       - name: Upload fat JARs as artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -80,4 +86,5 @@ jobs:
           path: |
             target/data-bridge.jar
             target/data-bridge-catalog.jar
+            target/bom.json
           retention-days: 14
