@@ -1,111 +1,174 @@
 package digital.singularidade.databridge.support;
 
+import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.images.builder.Transferable;
+import org.testcontainers.utility.DockerImageName;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Firebird Testcontainer fixture. Uses {@code jacobalberty/firebird:v4.0} (the most-pulled
- * community image). No first-class Testcontainers module exists for Firebird, so we wrap a
- * {@link GenericContainer} manually.
+ * Firebird Testcontainer fixture on the official {@code firebirdsql/firebird} image (Firebird 3 by
+ * default — the engine SGH runs). No first-class Testcontainers module is used; a {@link GenericContainer}
+ * is enough and keeps the dependency list unchanged.
  *
- * <p>Bootstrap creates a small {@code SHOP} schema with a primary-keyed table plus a single-column
- * index (so {@code RDB$INDICES.RDB$STATISTICS} is populated for both total-rows and per-column
- * approximate cardinality). {@code SET STATISTICS INDEX} is run before close.
+ * <p>Bootstrap, in one {@code isql} script:
+ * <ul>
+ *   <li>the SHOP tables (CATEGORIES + PRODUCTS, 100 rows, statistics refreshed) used by the cardinality ITs;</li>
+ *   <li>{@code fixtures/fb-sgh-like.sql}: domains, NUMERIC/DECIMAL, BLOBs, computed and identity columns,
+ *       named and unnamed constraints, DESC/expression/inactive indexes, generators, triggers.</li>
+ * </ul>
+ *
+ * <p>Meant to be shared per test class ({@code @BeforeAll}) — tests must not change the schema of
+ * {@code sgh.fdb}; use {@link #isqlWithoutDatabase(String)} to create scratch databases.
  */
 public final class FbFixture implements AutoCloseable {
 
-    public static final String IMAGE = "jacobalberty/firebird:v4.0";
-    public static final String DB_PATH = "/firebird/data/test.fdb";
-    public static final int FB_PORT = 3050;
+    public static final String IMAGE_FB3 = "firebirdsql/firebird:3.0.14";
+    public static final String DB_DIR = "/var/lib/firebird/data";
+    public static final String DB_FILE = "sgh.fdb";
     public static final String USER = "SYSDBA";
     public static final String PASSWORD = "masterkey";
+    private static final int FB_PORT = 3050;
 
     private final GenericContainer<?> container;
+    private final AtomicInteger scriptCounter = new AtomicInteger();
 
     public FbFixture() {
-        this.container = new GenericContainer<>(IMAGE)
+        this(IMAGE_FB3);
+    }
+
+    public FbFixture(String image) {
+        this.container = new GenericContainer<>(DockerImageName.parse(image))
             .withExposedPorts(FB_PORT)
-            .withEnv("ISC_PASSWORD", PASSWORD)
-            .withEnv("FIREBIRD_DATABASE", "test.fdb")
-            .withEnv("EnableLegacyClientAuth", "true")
-            .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(2)));
+            .withEnv("FIREBIRD_ROOT_PASSWORD", PASSWORD)
+            .withEnv("FIREBIRD_DATABASE", DB_FILE)
+            .withEnv("FIREBIRD_DATABASE_DEFAULT_CHARSET", "ISO8859_1")
+            .waitingFor(Wait.forLogMessage(".*Starting Firebird.*\\s", 1)
+                .withStartupTimeout(Duration.ofMinutes(2)));
         this.container.start();
-        bootstrap();
+        waitUntilConnectable();
+        IsqlResult boot = isql(shopScript() + "\n" + resource("/fixtures/fb-sgh-like.sql"));
+        if (boot.exitCode() != 0) {
+            throw new IllegalStateException("FbFixture bootstrap failed:\n" + boot.output());
+        }
     }
 
     public String jdbcUrl() {
-        return "jdbc:firebirdsql://localhost:" + container.getMappedPort(FB_PORT)
-             + "/" + DB_PATH + "?user=" + USER + "&password=" + PASSWORD
-             + "&encoding=UTF8&wireCrypt=DISABLED";
+        return jdbcUrl(DB_FILE);
     }
 
-    private void bootstrap() {
-        try (Connection c = openWithRetries()) {
-            try (Statement s = c.createStatement()) {
-                // Two tables: a small lookup (CATEGORIES) and a 100-row table (PRODUCTS) with a
-                // single-column index on CATEGORY to populate per-column selectivity stats.
-                s.execute("CREATE TABLE CATEGORIES ("
-                    + " ID INTEGER NOT NULL PRIMARY KEY,"
-                    + " CODE VARCHAR(20) NOT NULL,"
-                    + " NAME VARCHAR(100) NOT NULL"
-                    + ")");
-                s.execute("CREATE TABLE PRODUCTS ("
-                    + " ID INTEGER NOT NULL PRIMARY KEY,"
-                    + " SKU VARCHAR(50) NOT NULL,"
-                    + " NAME VARCHAR(200) NOT NULL,"
-                    + " CATEGORY VARCHAR(20) NOT NULL,"
-                    + " PRICE NUMERIC(10,2) NOT NULL,"
-                    + " IN_STOCK SMALLINT NOT NULL"
-                    + ")");
-                s.execute("CREATE INDEX IDX_PRODUCTS_CATEGORY ON PRODUCTS (CATEGORY)");
-                s.execute("CREATE UNIQUE INDEX UK_PRODUCTS_SKU ON PRODUCTS (SKU)");
+    public String jdbcUrl(String dbFile) {
+        return jdbcUrlWithoutCredentials(dbFile) + "&user=" + USER + "&password=" + PASSWORD;
+    }
 
-                s.execute("INSERT INTO CATEGORIES VALUES (1, 'BOOK', 'Books')");
-                s.execute("INSERT INTO CATEGORIES VALUES (2, 'TECH', 'Tech')");
-                s.execute("INSERT INTO CATEGORIES VALUES (3, 'FOOD', 'Food')");
+    public String jdbcUrlWithoutCredentials() {
+        return jdbcUrlWithoutCredentials(DB_FILE);
+    }
 
-                // 100 products spread across 3 categories so distinct estimates are non-trivial
-                String[] cats = {"BOOK", "TECH", "FOOD"};
-                for (int i = 1; i <= 100; i++) {
-                    String cat = cats[i % 3];
-                    s.execute("INSERT INTO PRODUCTS VALUES ("
-                        + i + ", 'SKU-" + i + "', 'Product " + i + "', '" + cat + "',"
-                        + " " + (10 + (i % 50)) + ".00, " + ((i % 4 == 0) ? 0 : 1) + ")");
-                }
+    private String jdbcUrlWithoutCredentials(String dbFile) {
+        return "jdbc:firebirdsql://" + container.getHost() + ":" + container.getMappedPort(FB_PORT)
+             + "/" + DB_DIR + "/" + dbFile + "?encoding=ISO8859_1";
+    }
 
-                // Force statistics recomputation so RDB$STATISTICS reflects the loaded data.
-                s.execute("SET STATISTICS INDEX RDB$PRIMARY1");      // CATEGORIES PK (auto-named)
-                s.execute("SET STATISTICS INDEX RDB$PRIMARY2");      // PRODUCTS PK (auto-named)
-                s.execute("SET STATISTICS INDEX IDX_PRODUCTS_CATEGORY");
-                s.execute("SET STATISTICS INDEX UK_PRODUCTS_SKU");
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("FbFixture bootstrap failed", e);
+    /** Run an isql script against {@code sgh.fdb}. Stops at the first error ({@code -bail}). */
+    public IsqlResult isql(String script) {
+        return runIsql(script, DB_DIR + "/" + DB_FILE);
+    }
+
+    /** Run an isql script that carries its own {@code CREATE DATABASE} / {@code CONNECT}. */
+    public IsqlResult isqlWithoutDatabase(String script) {
+        return runIsql(script, null);
+    }
+
+    private IsqlResult runIsql(String script, String database) {
+        String path = "/tmp/fixture-" + scriptCounter.incrementAndGet() + ".sql";
+        container.copyFileToContainer(Transferable.of(script.getBytes(StandardCharsets.UTF_8)), path);
+        List<String> cmd = new ArrayList<>(List.of(
+            "isql", "-bail", "-q", "-user", USER, "-password", PASSWORD, "-i", path));
+        if (database != null) cmd.add(database);
+        try {
+            ExecResult r = container.execInContainer(cmd.toArray(String[]::new));
+            return new IsqlResult(r.getExitCode(), r.getStdout() + r.getStderr());
+        } catch (IOException e) {
+            throw new IllegalStateException("isql failed to run", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while running isql", e);
         }
     }
 
-    /** Firebird is slow to accept connections after the container reports listening. Retry briefly. */
-    private Connection openWithRetries() throws SQLException {
+    public record IsqlResult(int exitCode, String output) {}
+
+    private static String shopScript() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("CREATE TABLE CATEGORIES (ID INTEGER NOT NULL PRIMARY KEY,"
+                + " CODE VARCHAR(20) NOT NULL, NAME VARCHAR(100) NOT NULL);\n");
+        sb.append("CREATE TABLE PRODUCTS (ID INTEGER NOT NULL PRIMARY KEY, SKU VARCHAR(50) NOT NULL,"
+                + " NAME VARCHAR(200) NOT NULL, CATEGORY VARCHAR(20) NOT NULL,"
+                + " PRICE NUMERIC(10,2) NOT NULL, IN_STOCK SMALLINT NOT NULL);\n");
+        sb.append("CREATE INDEX IDX_PRODUCTS_CATEGORY ON PRODUCTS (CATEGORY);\n");
+        sb.append("CREATE UNIQUE INDEX UK_PRODUCTS_SKU ON PRODUCTS (SKU);\n");
+        sb.append("COMMIT;\n");
+        sb.append("INSERT INTO CATEGORIES VALUES (1, 'BOOK', 'Books');\n");
+        sb.append("INSERT INTO CATEGORIES VALUES (2, 'TECH', 'Tech');\n");
+        sb.append("INSERT INTO CATEGORIES VALUES (3, 'FOOD', 'Food');\n");
+        String[] cats = {"BOOK", "TECH", "FOOD"};
+        for (int i = 1; i <= 100; i++) {
+            sb.append("INSERT INTO PRODUCTS VALUES (").append(i).append(", 'SKU-").append(i)
+              .append("', 'Product ").append(i).append("', '").append(cats[i % 3]).append("', ")
+              .append(10 + (i % 50)).append(".00, ").append(i % 4 == 0 ? 0 : 1).append(");\n");
+        }
+        sb.append("COMMIT;\n");
+        // CATEGORIES and PRODUCTS are created first, so their unnamed PK indexes are RDB$PRIMARY1/2.
+        sb.append("SET STATISTICS INDEX RDB$PRIMARY1;\n");
+        sb.append("SET STATISTICS INDEX RDB$PRIMARY2;\n");
+        sb.append("SET STATISTICS INDEX IDX_PRODUCTS_CATEGORY;\n");
+        sb.append("SET STATISTICS INDEX UK_PRODUCTS_SKU;\n");
+        sb.append("COMMIT;\n");
+        return sb.toString();
+    }
+
+    private static String resource(String name) {
+        try (InputStream in = FbFixture.class.getResourceAsStream(name)) {
+            if (in == null) throw new IllegalStateException("missing resource: " + name);
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("cannot read " + name, e);
+        }
+    }
+
+    /** Firebird accepts connections a moment after it logs that it started. Retry briefly. */
+    private void waitUntilConnectable() {
         SQLException last = null;
         for (int i = 0; i < 30; i++) {
-            try { return DriverManager.getConnection(jdbcUrl()); }
-            catch (SQLException e) {
+            try (Connection ignored = DriverManager.getConnection(jdbcUrl())) {
+                return;
+            } catch (SQLException e) {
                 last = e;
-                try { Thread.sleep(500); } catch (InterruptedException ie) {
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new SQLException("interrupted while waiting for Firebird", ie);
+                    throw new IllegalStateException("interrupted while waiting for Firebird", ie);
                 }
             }
         }
-        throw last;
+        throw new IllegalStateException("Firebird did not accept connections", last);
     }
 
     @Override
-    public void close() { container.stop(); }
+    public void close() {
+        container.stop();
+    }
 }

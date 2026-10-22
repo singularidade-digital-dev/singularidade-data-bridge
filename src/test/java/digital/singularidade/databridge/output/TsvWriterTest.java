@@ -26,6 +26,7 @@ class TsvWriterTest {
             List.of(),
             List.of(),
             List.of(),
+            List.of(),
             new Sample(1, List.of(Map.of("nome", "FULANO\tCOM\tTAB"))),
             List.of(),
             new Cardinality(10, List.of(new Cardinality.PerColumn("id", 10, 0))),

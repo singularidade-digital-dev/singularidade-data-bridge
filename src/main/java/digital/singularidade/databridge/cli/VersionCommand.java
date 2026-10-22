@@ -1,6 +1,7 @@
 package digital.singularidade.databridge.cli;
 
 import digital.singularidade.databridge.BuildInfo;
+import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Spec;
 import picocli.CommandLine.Model.CommandSpec;
@@ -12,6 +13,8 @@ public final class VersionCommand implements Runnable {
 
     @Override
     public void run() {
-        spec.commandLine().getParent().getOut().println(BuildInfo.NAME + " " + BuildInfo.VERSION);
+        CommandLine parent = spec.commandLine().getParent();
+        String edition = parent.getCommand() instanceof CatalogMain ? CatalogMain.EDITION_SUFFIX : "";
+        parent.getOut().println(BuildInfo.NAME + " " + BuildInfo.VERSION + edition);
     }
 }

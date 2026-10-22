@@ -55,6 +55,8 @@ public final class PgFixture implements AutoCloseable {
             + "&password=" + container.getPassword();
     }
 
+    public String jdbcUrlWithoutCredentials() { return container.getJdbcUrl(); }
+
     public String username() { return container.getUsername(); }
     public String password() { return container.getPassword(); }
 

@@ -18,6 +18,7 @@ public record Metadata(
     List<Index> indexes,
     List<UniqueConstraint> uniqueConstraints,
     List<CheckConstraint> checkConstraints,
+    List<Trigger> triggers,
     Sample sample,
     List<ColumnStats> columnStats,
     Cardinality cardinality,

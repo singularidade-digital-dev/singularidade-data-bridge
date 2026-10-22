@@ -4,13 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import digital.singularidade.databridge.BuildInfo;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
-import digital.singularidade.databridge.error.UrlRedaction;
 import digital.singularidade.databridge.output.ColumnStatsMode;
 import digital.singularidade.databridge.output.ExtractAllIndex;
 import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.Metadata;
 import digital.singularidade.databridge.output.SourceUrlRedaction;
 import digital.singularidade.databridge.output.SqlFileWriter;
+import digital.singularidade.databridge.output.StableOutput;
 import digital.singularidade.databridge.output.TsvWriter;
 import digital.singularidade.databridge.pipeline.MetadataPipeline;
 import digital.singularidade.databridge.pipeline.ddl.DdlBuilders;
@@ -18,6 +18,7 @@ import digital.singularidade.databridge.source.CardinalityMode;
 import digital.singularidade.databridge.source.jdbc.DriverHints;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
 
 import java.io.OutputStream;
@@ -38,7 +39,7 @@ import java.util.concurrent.Callable;
                 + "Produces one subdirectory per table plus a top-level _index.json summary.")
 public final class ExtractAllCommand implements Callable<Integer> {
 
-    @Option(names = "--jdbc-url", required = true) String jdbcUrl;
+    @Mixin ConnectionOptions conn;
     @Option(names = "--schema",
             description = "Source schema name. Required for PG/MySQL/Oracle/MSSQL. Omit for Firebird.")
     String schema;
@@ -91,17 +92,26 @@ public final class ExtractAllCommand implements Callable<Integer> {
             description = "Table name(s) to skip. Repeatable: --exclude audit_log --exclude staging.")
     List<String> excludes = new ArrayList<>();
 
+    @Option(names = "--stable", defaultValue = "false",
+            description = "Output meant for git: no timestamps, versions, URL, warnings, counts or "
+                        + "database-generated names; lists in a fixed order. Implies no cardinality.")
+    boolean stable;
+
     @Option(names = {"-q", "--quiet"}, defaultValue = "false") boolean quiet;
     @Option(names = {"-v", "--verbose"}, defaultValue = "false") boolean verbose;
 
     @Override
     public Integer call() {
         PrintStream progress = quiet ? new PrintStream(OutputStream.nullOutputStream()) : System.err;
-        CardinalityMode mode = skipCardinality ? CardinalityMode.SKIP
+        if (stable && sampleRows > 0) {
+            return CliErrors.report(new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "--stable cannot be combined with --sample-rows", "Drop --sample-rows for versioned output"), verbose);
+        }
+        CardinalityMode mode = skipCardinality || stable ? CardinalityMode.SKIP
             : CardinalityMode.fromWireName(cardinalityMode);
-        ColumnStatsMode csMode = ColumnStatsMode.fromWireName(columnStatsMode);
+        ColumnStatsMode csMode = stable ? ColumnStatsMode.OFF : ColumnStatsMode.fromWireName(columnStatsMode);
         SourceUrlRedaction urlRed = SourceUrlRedaction.fromWireName(sourceUrlRedaction);
-        try (JdbcSource src = JdbcSource.open(jdbcUrl)) {
+        try (JdbcSource src = JdbcSource.open(conn.resolve())) {
             boolean schemaEmpty = (schema == null || schema.isBlank());
             if (schemaEmpty && src.hints() != DriverHints.FIREBIRD) {
                 throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
@@ -109,6 +119,7 @@ public final class ExtractAllCommand implements Callable<Integer> {
                     "Firebird is the only single-namespace driver that can omit --schema. "
                   + "For PG/MySQL/Oracle/MSSQL pass e.g. --schema=public.");
             }
+            src.requireSchema(schema);
             String schemaLabel = schemaEmpty ? "(no schema — Firebird)" : "schema '" + schema + "'";
             Set<String> excludeSet = new HashSet<>(excludes);
             List<String> tables = src.listTables(schema, includeViews).stream()
@@ -126,14 +137,16 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 progress.printf("== [%d/%d] %s ==%n", i + 1, tables.size(), tableLabel);
 
                 Metadata m = new MetadataPipeline(progress, mode, csMode, urlRed)
-                    .run(src, jdbcUrl, schema, table, sampleRows);
+                    .run(src, conn.jdbcUrl(), schema, table, sampleRows);
 
                 Path tableDir = ExtractCommand.targetDir(outDir, schema, table);
-                new JsonWriter().write(m, tableDir.resolve("metadata.json"));
+                new JsonWriter().write(stable ? StableOutput.metadata(JsonWriter.newMapper(), m) : m,
+                    tableDir.resolve("metadata.json"));
                 if (tsv) new TsvWriter().writeAll(m, tableDir);
                 if (includeDdl) {
                     DdlBuilders.forDriver(src.hints())
-                        .build(src, schema, table, urlRed.apply(jdbcUrl), includeTriggers)
+                        .build(src, schema, table, urlRed.apply(conn.jdbcUrl()), includeTriggers)
+                        .map(script -> stable ? script.stable() : script)
                         .ifPresent(script -> {
                             new SqlFileWriter().write(script.toFileText(), tableDir.resolve("ddl.sql"));
                             if (includeTriggers && !script.triggers().isBlank()) {
@@ -154,25 +167,21 @@ public final class ExtractAllCommand implements Callable<Integer> {
                 Instant.now(),
                 new Metadata.Generator(BuildInfo.NAME, BuildInfo.VERSION),
                 new ExtractAllIndex.SchemaSource("jdbc", src.driverWireName(),
-                    urlRed.apply(jdbcUrl), schema),
+                    urlRed.apply(conn.jdbcUrl()), schema),
                 summaries.size(),
                 summaries);
-            writeIndex(index, outDir.resolve("_index.json"));
+            writeIndex(stable ? StableOutput.index(JsonWriter.newMapper(), index) : index,
+                outDir.resolve("_index.json"));
 
             progress.printf("Done — wrote %d table(s) + _index.json to %s%n",
                 summaries.size(), outDir.toAbsolutePath());
             return ErrorCodes.OK.exitCode();
-        } catch (DataBridgeException e) {
-            emitError(e);
-            return e.code().exitCode();
         } catch (RuntimeException e) {
-            emitError(new DataBridgeException(ErrorCodes.UNSPECIFIED,
-                e.getMessage(), null, e));
-            return ErrorCodes.UNSPECIFIED.exitCode();
+            return CliErrors.report(e, verbose);
         }
     }
 
-    private static void writeIndex(ExtractAllIndex index, Path target) {
+    private static void writeIndex(Object index, Path target) {
         Path dir = target.getParent();
         Path tmp = dir.resolve("." + target.getFileName().toString() + ".partial");
         try {
@@ -189,24 +198,5 @@ public final class ExtractAllCommand implements Callable<Integer> {
         }
     }
 
-    private void emitError(DataBridgeException e) {
-        StringBuilder sb = new StringBuilder("{\"error\":{\"code\":\"")
-            .append(e.code().wireName()).append("\",\"message\":\"")
-            .append(jsonEscape(UrlRedaction.redact(e.getMessage())))
-            .append("\"");
-        if (e.hint() != null) sb.append(",\"hint\":\"").append(jsonEscape(e.hint())).append("\"");
-        if (verbose && e.getCause() != null) {
-            sb.append(",\"cause\":\"")
-                .append(jsonEscape(e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage()))
-                .append("\"");
-        }
-        sb.append("}}");
-        System.err.println(sb);
-        if (verbose && e.getCause() != null) e.getCause().printStackTrace(System.err);
-    }
 
-    private static String jsonEscape(String s) {
-        if (s == null) return "";
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
-    }
 }

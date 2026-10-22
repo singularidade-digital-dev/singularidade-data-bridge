@@ -13,13 +13,29 @@ import digital.singularidade.databridge.output.Partitioning;
 import digital.singularidade.databridge.output.QueryResult;
 import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.TableInfo;
+import digital.singularidade.databridge.output.Trigger;
 import digital.singularidade.databridge.output.UniqueConstraint;
+import digital.singularidade.databridge.query.BoundSql;
+import digital.singularidade.databridge.query.NamedQuery;
+import digital.singularidade.databridge.query.SqlGuard;
 import digital.singularidade.databridge.source.Source;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbCheck;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbColumn;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbDomain;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbIndex;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbKey;
+import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbTrigger;
+import digital.singularidade.databridge.source.jdbc.firebird.FirebirdCatalog;
+import digital.singularidade.databridge.source.jdbc.firebird.FirebirdTypes;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.DriverManager;
+import java.sql.JDBCType;
+import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -34,8 +50,12 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -48,6 +68,7 @@ public final class JdbcSource implements Source {
     private final Map<String, List<String>> pkCache = new HashMap<>();
     private final Map<String, PgClassInfo> pgClassCache = new HashMap<>();
     private final Map<String, Map<String, PgStatsEntry>> pgStatsCache = new HashMap<>();
+    private final Map<String, FbTable> fbTables = new HashMap<>();
 
     private record PgClassInfo(String owner, Long approxRows, String viewDef,
                                 String partitionStrategy, List<String> partitionKey) {}
@@ -61,10 +82,14 @@ public final class JdbcSource implements Source {
     }
 
     public static JdbcSource open(String jdbcUrl) {
-        DriverHints hints = DriverHints.fromUrl(jdbcUrl);
-        String urlWithAppName = withApplicationName(jdbcUrl, hints);
+        return open(new ConnectionSettings(jdbcUrl, null, null));
+    }
+
+    public static JdbcSource open(ConnectionSettings settings) {
+        DriverHints hints = DriverHints.fromUrl(settings.url());
+        String urlWithAppName = withApplicationName(settings.url(), hints);
         try {
-            Connection c = DriverManager.getConnection(urlWithAppName);
+            Connection c = DriverManager.getConnection(urlWithAppName, settings.toProperties());
             c.setReadOnly(true);
             ServerVersion version = detectServerVersion(c, hints);
             if (hints == DriverHints.PG) {
@@ -221,6 +246,60 @@ public final class JdbcSource implements Source {
         return out;
     }
 
+    /**
+     * The table's name as stored: an exact match first, then the driver's case for unquoted identifiers
+     * (upper on Firebird/Oracle, lower on PostgreSQL). JDBC pattern wildcards ({@code _}, {@code %}) are
+     * escaped and every hit is compared exactly, so {@code TB_X} never resolves to {@code TBAX}.
+     */
+    public Optional<String> resolveTable(String schema, String table) {
+        if (table == null || table.isBlank()) return Optional.empty();
+        List<String> candidates = new ArrayList<>(List.of(table));
+        String folded = switch (hints) {
+            case FIREBIRD, ORACLE -> table.toUpperCase(Locale.ROOT);
+            case PG -> table.toLowerCase(Locale.ROOT);
+            case MSSQL, MYSQL -> table;
+        };
+        if (!folded.equals(table)) candidates.add(folded);
+        try {
+            DatabaseMetaData md = connection.getMetaData();
+            String escape = md.getSearchStringEscape();
+            for (String candidate : candidates) {
+                try (ResultSet rs = md.getTables(connection.getCatalog(),
+                        schema == null ? null : escapePattern(schema, escape),
+                        escapePattern(candidate, escape), null)) {
+                    while (rs.next()) {
+                        if (candidate.equals(rs.getString("TABLE_NAME"))) return Optional.of(candidate);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "table lookup failed: " + e.getMessage(), null, e);
+        }
+        return Optional.empty();
+    }
+
+    /** Fails with SCHEMA_NOT_FOUND when {@code schema} is given and missing (PostgreSQL, Oracle, SQL Server). */
+    public void requireSchema(String schema) {
+        if (schema == null || schema.isBlank()) return;
+        if (hints != DriverHints.PG && hints != DriverHints.ORACLE && hints != DriverHints.MSSQL) return;
+        try (ResultSet rs = connection.getMetaData().getSchemas()) {
+            while (rs.next()) {
+                if (schema.equals(rs.getString("TABLE_SCHEM"))) return;
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "schema lookup failed: " + e.getMessage(), null, e);
+        }
+        throw new DataBridgeException(ErrorCodes.SCHEMA_NOT_FOUND, "schema not found: " + schema,
+            "Schema names are case-sensitive here; list them with your database client");
+    }
+
+    private static String escapePattern(String name, String escape) {
+        if (escape == null || escape.isEmpty()) return name;
+        return name.replace(escape, escape + escape).replace("_", escape + "_").replace("%", escape + "%");
+    }
+
     @Override
     public List<Column> columns(String schema, String table) {
         List<String> pk = primaryKey(schema, table);
@@ -268,6 +347,46 @@ public final class JdbcSource implements Source {
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
                 "columns failed: " + e.getMessage(), null, e);
+        }
+        return hints == DriverHints.FIREBIRD ? enrichFirebirdColumns(out, firebirdTable(table)) : out;
+    }
+
+    /**
+     * The Firebird catalog model of {@code table}, read once per run and shared by metadata.json
+     * enrichment and the DDL builder.
+     */
+    public FbTable firebirdTable(String table) {
+        FbTable cached = fbTables.get(table);
+        if (cached != null) return cached;
+        FbTable read = FirebirdCatalog.read(connection, table);
+        fbTables.put(table, read);
+        return read;
+    }
+
+    /** Adds what JDBC metadata cannot say: native type, charset, collation, domain, generator link. */
+    private static List<Column> enrichFirebirdColumns(List<Column> columns, FbTable t) {
+        Map<String, FbColumn> byName = new HashMap<>();
+        for (FbColumn f : t.columns()) byName.put(f.name(), f);
+        List<Column> out = new ArrayList<>(columns.size());
+        for (Column c : columns) {
+            FbColumn f = byName.get(c.name());
+            if (f == null) {
+                out.add(c);
+                continue;
+            }
+            FbDomain d = t.domain(f.domainName()).orElse(null);
+            Column.Domain domain = d == null ? null : new Column.Domain(d.name(), d.notNull(),
+                d.defaultValue(), FirebirdCatalog.stripKeyword(d.checkSource(), "CHECK"));
+            Column.Sequence sequence = f.sequence() == null ? c.sequence()
+                : new Column.Sequence(f.sequence().generator(), null, f.sequence().source(), f.sequence().trigger());
+            Column.Generated generated = new Column.Generated(c.generated().isIdentity(),
+                c.generated().isComputed() || f.computedSource() != null,
+                f.computedSource() != null ? f.computedSource() : c.generated().generationExpression());
+            String sqlType = FirebirdTypes.isBlob(f.type()) ? FirebirdTypes.blobSqlType(f.type()) : c.sqlType();
+            out.add(new Column(c.name(), c.ordinalPosition(), sqlType, c.jdbcType(), c.nullable(),
+                c.primaryKey(), c.characterMaxLength(), c.numericPrecision(), c.numericScale(),
+                c.defaultValue(), c.comment(), generated, sequence, f.collation(), f.nativeType(),
+                f.charset(), domain));
         }
         return out;
     }
@@ -381,6 +500,7 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<Index> indexes(String schema, String table) {
+        if (hints == DriverHints.FIREBIRD) return firebirdIndexes(firebirdTable(table));
         Map<String, IndexBuilder> grouped = new LinkedHashMap<>();
         try (ResultSet rs = connection.getMetaData()
                 .getIndexInfo(connection.getCatalog(), schema, table, false, false)) {
@@ -410,6 +530,20 @@ public final class JdbcSource implements Source {
             PgIndexAugment a = augments.get(b.name);
             out.add(new Index(b.name, List.copyOf(b.columns), List.copyOf(b.ordinalAsc),
                 b.unique, primary, a != null ? a.method() : null, a != null ? a.where() : null));
+        }
+        return out;
+    }
+
+    /** Firebird indexes straight from the catalog: segment order, direction, expression, state, owner. */
+    private static List<Index> firebirdIndexes(FbTable t) {
+        String pkIndex = t.primaryKey() == null ? null : t.primaryKey().indexName();
+        List<Index> out = new ArrayList<>();
+        for (FbIndex i : t.indexes()) {
+            List<Boolean> asc = i.expression() != null
+                ? List.of(!i.descending())
+                : Collections.nCopies(i.columns().size(), !i.descending());
+            out.add(new Index(i.name(), i.columns(), List.copyOf(asc), i.unique(), i.name().equals(pkIndex),
+                null, null, i.expression(), i.active(), i.constraintName()));
         }
         return out;
     }
@@ -456,6 +590,11 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<UniqueConstraint> uniqueConstraints(String schema, String table) {
+        if (hints == DriverHints.FIREBIRD) {
+            List<UniqueConstraint> out = new ArrayList<>();
+            for (FbKey k : firebirdTable(table).uniques()) out.add(new UniqueConstraint(k.name(), k.columns()));
+            return out;
+        }
         if (hints != DriverHints.PG) return List.of();
         String sql = """
             SELECT tc.constraint_name, kcu.column_name, kcu.ordinal_position
@@ -489,6 +628,13 @@ public final class JdbcSource implements Source {
 
     @Override
     public List<CheckConstraint> checkConstraints(String schema, String table) {
+        if (hints == DriverHints.FIREBIRD) {
+            List<CheckConstraint> out = new ArrayList<>();
+            for (FbCheck ck : firebirdTable(table).checks()) {
+                out.add(new CheckConstraint(ck.name(), FirebirdCatalog.stripKeyword(ck.source(), "CHECK")));
+            }
+            return out;
+        }
         if (hints != DriverHints.PG) return List.of();
         String sql = """
             SELECT cc.constraint_name, cc.check_clause
@@ -514,6 +660,17 @@ public final class JdbcSource implements Source {
         } catch (SQLException e) {
             throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
                 "checkConstraints failed: " + e.getMessage(), null, e);
+        }
+        return out;
+    }
+
+    @Override
+    public List<Trigger> triggers(String schema, String table) {
+        if (hints != DriverHints.FIREBIRD) return List.of();
+        List<Trigger> out = new ArrayList<>();
+        for (FbTrigger t : firebirdTable(table).triggers()) {
+            out.add(new Trigger(t.name(), t.timing(), t.events(), t.position(), t.active(), t.body(),
+                t.generators()));
         }
         return out;
     }
@@ -639,7 +796,9 @@ public final class JdbcSource implements Source {
     public Sample sample(String schema, String table, int limit) {
         if (limit <= 0) return new Sample(0, List.of());
         String fqn = fullyQualified(schema, table);
-        String sql = "SELECT * FROM " + fqn + " LIMIT " + limit;
+        String sql = hints == DriverHints.FIREBIRD
+            ? "SELECT FIRST " + limit + " * FROM " + fqn
+            : "SELECT * FROM " + fqn + " LIMIT " + limit;
         List<Map<String, Object>> rows = new ArrayList<>();
         try (Statement st = connection.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
@@ -949,22 +1108,9 @@ public final class JdbcSource implements Source {
     }
 
     // ================================================================================
-    //   QueryExecutor — defense-in-depth read-only by default; --writable opts in
-    //   for DML. DDL is rejected unconditionally. Multi-statement is rejected.
+    //   QueryExecutor — read-only by default; --writable opts in to DML. The statement
+    //   guard lives in SqlGuard; the read-only connection flag is the second layer.
     // ================================================================================
-
-    private static final Pattern MULTI_STMT_KEYWORD = Pattern.compile(
-        ";\\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|UPSERT|DROP|CREATE|ALTER|TRUNCATE|"
-        + "GRANT|REVOKE|VACUUM|ANALYZE|EXPLAIN|WITH|BEGIN|COMMIT|ROLLBACK|CALL)\\b",
-        Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern DDL_LEADING = Pattern.compile(
-        "^\\s*(DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE)\\b",
-        Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern READONLY_OK_LEADING = Pattern.compile(
-        "^\\s*(SELECT|WITH|EXPLAIN|SHOW)\\b",
-        Pattern.CASE_INSENSITIVE);
 
     @Override
     public QueryResult executeQuery(String sql, int limit, int timeoutSec, boolean writable) {
@@ -977,24 +1123,8 @@ public final class JdbcSource implements Source {
                 "limit must be > 0 (got " + limit + ")",
                 "pass --limit 100 (or any positive value)");
         }
-        // Layer 2a: reject multi-statement attempts (defense against `; DROP TABLE` injection patterns)
-        if (MULTI_STMT_KEYWORD.matcher(sql).find()) {
-            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
-                "multi-statement queries are not allowed",
-                "submit one statement per call");
-        }
-        // Layer 2b: DDL is forbidden ALWAYS, even with --writable (use Liquibase/Flyway for schema changes)
-        if (DDL_LEADING.matcher(sql).find()) {
-            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
-                "DDL is not allowed (use Liquibase/Flyway for schema changes)",
-                null);
-        }
-        // Layer 2c: when not writable, only allow SELECT-shaped statements
-        if (!writable && !READONLY_OK_LEADING.matcher(sql).find()) {
-            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
-                "non-SELECT statement requires --writable",
-                "pass --writable to allow INSERT/UPDATE/DELETE; data-bridge never permits DDL");
-        }
+        // Layer 2: one allowlisted statement, checked on the blanked SQL (see SqlGuard)
+        String runnable = SqlGuard.check(sql, hints, writable);
 
         // Layer 1: read-only flag on the connection (Postgres etc. enforce; some drivers ignore)
         boolean wasReadOnly = false;
@@ -1017,7 +1147,7 @@ public final class JdbcSource implements Source {
                 // Ask for one more than the limit so we can distinguish "exactly N rows"
                 // from "more than N rows available" — the latter sets truncated=true.
                 st.setMaxRows(limit + 1);
-                boolean hasResultSet = st.execute(sql);
+                boolean hasResultSet = st.execute(runnable);
                 long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
                 if (hasResultSet) {
                     try (ResultSet rs = st.getResultSet()) {
@@ -1037,6 +1167,89 @@ public final class JdbcSource implements Source {
                 try { connection.setReadOnly(true); } catch (SQLException ignored) {}
             }
         }
+    }
+
+    /**
+     * Run a named query read-only: guard it like {@code query}, bind each {@code :param} with the value
+     * converted to the type the driver reports for its placeholder, and collect at most {@code limit} rows.
+     */
+    public QueryResult executeNamed(NamedQuery query, Map<String, String> params, int limit, int timeoutSec) {
+        if (limit <= 0) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "limit must be > 0 (got " + limit + ")", "pass --limit 100 (or any positive value)");
+        }
+        BoundSql bound = BoundSql.of(SqlGuard.check(query.sql(), hints, false));
+        Map<String, String> given = params == null ? Map.of() : params;
+        Set<String> needed = new LinkedHashSet<>(bound.parameterNames());
+        List<String> missing = needed.stream().filter(k -> !given.containsKey(k)).toList();
+        List<String> unknown = given.keySet().stream().filter(k -> !needed.contains(k)).toList();
+        if (!missing.isEmpty()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "missing parameter(s) for '" + query.name() + "': " + String.join(", ", missing),
+                "pass --param NAME=VALUE for each :NAME in the query");
+        }
+        if (!unknown.isEmpty()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "unknown parameter(s) for '" + query.name() + "': " + String.join(", ", unknown), null);
+        }
+        long t0 = System.nanoTime();
+        try (PreparedStatement ps = connection.prepareStatement(bound.jdbcSql())) {
+            ParameterMetaData pmd = null;
+            try { pmd = ps.getParameterMetaData(); } catch (SQLException ignored) { /* bind as text */ }
+            List<String> names = bound.parameterNames();
+            for (int i = 1; i <= names.size(); i++) {
+                int type = Types.VARCHAR;
+                if (pmd != null) {
+                    try { type = pmd.getParameterType(i); } catch (SQLException ignored) { /* text */ }
+                }
+                bind(ps, i, names.get(i - 1), given.get(names.get(i - 1)), type);
+            }
+            if (timeoutSec > 0) ps.setQueryTimeout(timeoutSec);
+            ps.setMaxRows(limit + 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                return collectRows(rs, limit, (System.nanoTime() - t0) / 1_000_000);
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "query '" + query.name() + "' failed: " + e.getMessage(),
+                "verify the SQL is valid for the target driver", e);
+        }
+    }
+
+    private static void bind(PreparedStatement ps, int index, String name, String value, int sqlType)
+            throws SQLException {
+        try {
+            switch (sqlType) {
+                case Types.INTEGER, Types.SMALLINT, Types.TINYINT -> ps.setInt(index, Integer.parseInt(value.strip()));
+                case Types.BIGINT -> ps.setLong(index, Long.parseLong(value.strip()));
+                case Types.NUMERIC, Types.DECIMAL -> ps.setBigDecimal(index, new BigDecimal(value.strip()));
+                case Types.REAL, Types.FLOAT, Types.DOUBLE -> ps.setDouble(index, Double.parseDouble(value.strip()));
+                case Types.BOOLEAN, Types.BIT -> ps.setBoolean(index, parseBoolean(value));
+                case Types.DATE -> ps.setDate(index, Date.valueOf(value.strip()));
+                case Types.TIME -> ps.setTime(index, Time.valueOf(value.strip()));
+                case Types.TIMESTAMP -> ps.setTimestamp(index, parseTimestamp(value));
+                default -> ps.setString(index, value);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "parameter " + name + ": cannot convert '" + value + "' to " + JDBCType.valueOf(sqlType).getName(),
+                "dates are yyyy-mm-dd, timestamps yyyy-mm-dd hh:mm:ss", e);
+        }
+    }
+
+    /** {@code yyyy-mm-dd[ T]hh:mm:ss[.f]}, or a plain {@code yyyy-mm-dd} meaning midnight. */
+    private static Timestamp parseTimestamp(String value) {
+        String v = value.strip().replace('T', ' ');
+        return Timestamp.valueOf(v.length() == 10 ? v + " 00:00:00" : v);
+    }
+
+    private static boolean parseBoolean(String value) {
+        String v = value.strip().toLowerCase(Locale.ROOT);
+        return switch (v) {
+            case "true", "t", "1", "yes", "y" -> true;
+            case "false", "f", "0", "no", "n" -> false;
+            default -> throw new IllegalArgumentException("not a boolean: " + value);
+        };
     }
 
     private QueryResult collectRows(ResultSet rs, int limit, long elapsedMs) throws SQLException {

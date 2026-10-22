@@ -27,12 +27,13 @@ public final class JsonWriter {
     public JsonWriter() { this(newMapper()); }
     public JsonWriter(ObjectMapper mapper) { this.mapper = mapper; }
 
-    public void write(Metadata m, Path target) {
+    /** Writes {@code value} (a {@link Metadata}, an index, or a JSON tree) as pretty JSON, atomically. */
+    public void write(Object value, Path target) {
         Path dir = target.getParent();
         Path tmp = dir.resolve("." + target.getFileName().toString() + ".partial");
         try {
             if (dir != null) Files.createDirectories(dir);
-            byte[] body = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(m);
+            byte[] body = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(value);
             Files.write(tmp, body);
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {

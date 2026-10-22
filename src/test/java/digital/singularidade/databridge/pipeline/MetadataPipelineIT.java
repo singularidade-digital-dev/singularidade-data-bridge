@@ -16,7 +16,7 @@ class MetadataPipelineIT {
 
             Metadata m = new MetadataPipeline().run(src, fx.jdbcUrl(), "atl", "cliente", 5);
 
-            assertThat(m.version()).isEqualTo("1.0");
+            assertThat(m.version()).isEqualTo("1.1");
             assertThat(m.source().table()).isEqualTo("cliente");
             // Default redaction is HOST_PORT — host:port replaced
             assertThat(m.source().url()).contains("password=***").contains("[redacted-host]");

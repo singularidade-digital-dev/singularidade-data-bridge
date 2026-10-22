@@ -1,6 +1,6 @@
 # Releasing
 
-Cutting a release of `singularidade-data-bridge` means: tagging a commit on `main` with `vX.Y.Z`, building a fat JAR from that tag, and publishing it as a GitHub Release. The CI workflow (`.github/workflows/release.yml`) does the build and publish automatically — your job is to produce a valid tag.
+Cutting a release of `singularidade-data-bridge` means: tagging a commit on `main` with `vX.Y.Z`, building the two fat JARs (full and catalog) from that tag, and publishing them as a GitHub Release. The CI workflow (`.github/workflows/release.yml`) does the build and publish automatically — your job is to produce a valid tag.
 
 There are three ways to produce the tag, in increasing order of automation. Pick whichever matches your context.
 
@@ -37,14 +37,14 @@ scripts/release.sh <version> [next-snapshot]
 2. Confirms the plan with you (`y/N` prompt).
 3. Bumps `pom.xml` from current `-SNAPSHOT` to release version via `mvn versions:set`.
 4. Runs `mvn -B verify` — if any test fails, the release aborts and `pom.xml` is restored.
-5. Smoke-checks the fat JAR by running `data-bridge version` and asserting the expected output.
+5. Smoke-checks both fat JARs by running `version` and asserting the expected output (`... (catalog)` for the catalog edition).
 6. Commits the bump as `chore: release v<version>`.
 7. Tags `v<version>` on that commit.
 8. Bumps `pom.xml` to the next-snapshot version.
 9. Commits as `chore: bump to <next-snapshot> for next dev cycle`.
 10. Pushes `main` (2 new commits) and the tag.
 
-The tag push triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which rebuilds the JAR, computes its SHA-256, and creates a GitHub Release with both files attached and auto-generated release notes.
+The tag push triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which rebuilds both JARs, computes their SHA-256, and creates a GitHub Release with the four files attached and auto-generated release notes.
 
 ### Dry run
 
@@ -96,8 +96,8 @@ The tag must match `vMAJOR.MINOR.PATCH[-suffix]` — `release.yml` rejects anyth
 
 | Component | When |
 |---|---|
-| **MAJOR** (`X.y.z → (X+1).0.0`) | Backwards-incompatible change to the JSON output contract (§5 of the design spec), CLI surface, or HTTP API. The contract `version` field also bumps. |
-| **MINOR** (`x.Y.z → x.(Y+1).0`) | Additive feature: new field in the JSON contract, new CLI subcommand or flag, new HTTP endpoint, support for a new driver. Backward-compatible — existing consumers keep working. |
+| **MAJOR** (`X.y.z → (X+1).0.0`) | Backwards-incompatible change to the JSON output contract (see the README's *Output contract*) or the CLI surface. The contract `version` field also bumps. |
+| **MINOR** (`x.Y.z → x.(Y+1).0`) | Additive feature: new field in the JSON contract, new CLI subcommand or flag, support for a new driver. Backward-compatible — existing consumers keep working. |
 | **PATCH** (`x.y.Z → x.y.(Z+1)`) | Bug fix, perf improvement, dependency bump that doesn't change behavior. |
 | **`-SNAPSHOT`** | Always trails the next intended release in `pom.xml` on `main`. Never released. |
 
@@ -140,8 +140,10 @@ For a release `vX.Y.Z`, the GitHub Release page will host:
 
 | Asset | Size | Purpose |
 |---|---|---|
-| `data-bridge-vX.Y.Z.jar` | ~24 MB | Fat JAR with all 5 JDBC drivers shaded in. Download this. |
+| `data-bridge-vX.Y.Z.jar` | ~19 MB | Full fat JAR with all 5 JDBC drivers shaded in: `extract`, `extract-all`, `list-tables`, `query`, `run-query`. |
 | `data-bridge-vX.Y.Z.jar.sha256` | small | SHA-256 of the JAR. Verify with `sha256sum -c data-bridge-vX.Y.Z.jar.sha256`. |
+| `data-bridge-catalog-vX.Y.Z.jar` | ~19 MB | Catalog edition: same drivers, no free-form `query` command (`run-query` with a queries file only). |
+| `data-bridge-catalog-vX.Y.Z.jar.sha256` | small | SHA-256 of the catalog JAR. |
 | Auto-generated release notes | — | List of merged PRs / commits since the previous tag. |
 
 Consumers download via the GitHub Releases API (see the [README install section](README.md#option-a--download-the-release-jar-recommended)) or directly from the release page.
@@ -150,7 +152,7 @@ Consumers download via the GitHub Releases API (see the [README install section]
 
 ## Post-release checklist
 
-- [ ] GitHub Release page shows the new tag, JAR, and SHA-256.
+- [ ] GitHub Release page shows the new tag, both JARs, and both SHA-256 files.
 - [ ] `release.yml` run is green.
 - [ ] `mvn -DskipTests dependency:tree` against the released artifact (if depended on by another project) resolves cleanly.
 - [ ] If a downstream consumer (e.g. `mcp-tool-from-table-orgen-ai`) pins to a specific version, bump its pin in a follow-up commit.

@@ -10,6 +10,7 @@ import digital.singularidade.databridge.output.Partitioning;
 import digital.singularidade.databridge.output.QueryResult;
 import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.TableInfo;
+import digital.singularidade.databridge.output.Trigger;
 import digital.singularidade.databridge.output.UniqueConstraint;
 
 import java.util.List;
@@ -26,6 +27,12 @@ public interface Source extends AutoCloseable {
     List<Index> indexes(String schema, String table);
     List<UniqueConstraint> uniqueConstraints(String schema, String table);
     List<CheckConstraint> checkConstraints(String schema, String table);
+
+    /** Triggers of the table; drivers without trigger support return an empty list. */
+    default List<Trigger> triggers(String schema, String table) {
+        return List.of();
+    }
+
     Sample sample(String schema, String table, int limit);
     List<ColumnStats> columnStats(String schema, String table);
     Partitioning partitioning(String schema, String table);

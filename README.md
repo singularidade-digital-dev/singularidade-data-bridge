@@ -5,94 +5,98 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/java-21-orange.svg)](https://adoptium.net/temurin/releases/?version=21)
 
-A uniform JDBC introspection tool. Point it at any supported database, name a table, and get back a single, versioned JSON document describing the table's schema, constraints, indexes, sample rows, column statistics, partitioning, and cardinality — plus optional human-friendly TSV dumps.
+A uniform JDBC introspection tool. Point it at any supported database, name one or more tables, and get back a versioned JSON document per table describing its schema, constraints, indexes, triggers, sample rows, column statistics, partitioning and cardinality — plus the table's DDL in the database's own dialect and optional TSV dumps.
 
-Runs as a one-shot **CLI** for ad-hoc extraction, or as a long-running **HTTP daemon** with HikariCP-pooled connections for repeated calls from local tooling.
+It is a one-shot **CLI**: every call opens one connection, does its job and exits.
 
 ---
 
 ## Why this exists
 
-LLMs and code-generation agents increasingly need to **understand or query** relational databases — to plan ETL jobs, to generate MCP tools or migrations, to validate a hypothesis against real data, to draft a query before sending it for review. Today, that's normally done via per-database **MCP servers** (`mcp-server-postgres`, `mcp-server-mysql`, vendor-specific Firebird/Oracle servers, etc.). It works, but at a cost:
+LLMs and code-generation agents increasingly need to **understand or query** relational databases — to plan ETL jobs, to generate MCP tools, entities or migrations, to validate a hypothesis against real data. Today that is normally done through per-database **MCP servers**. It works, but at a cost:
 
 | Pain | Why it bites |
 |---|---|
-| **Heterogeneous APIs** | Each MCP server exposes a different tool surface (`pg_execute_sql`, `query`, `list-tables`, `analyze-missing-indexes`, ...). The agent has to learn N flavors. |
+| **Heterogeneous APIs** | Each MCP server exposes a different tool surface (`pg_execute_sql`, `query`, `describe-table`, `analyze-missing-indexes`, ...). The agent has to learn N flavors. |
 | **Heavy install** | Each server needs its own runtime (Node, Python, Go), its own dependency tree, its own process. Five DBs = five servers. |
-| **Unsafe defaults** | Many expose destructive operations as first-class tools (`pg_execute_mutation`, `truncate`, `drop-index`). One LLM hallucination away from data loss. |
+| **Unsafe defaults** | Many expose destructive operations as first-class tools. One LLM hallucination away from data loss. |
 | **TLS / sandbox friction** | Connecting to remote managed databases via JS/Python tooling regularly hits chain rejection, cert pinning, sandboxed-process port restrictions. |
-| **Output drift** | Same conceptual operation ("describe this table") returns different shapes per server. Agent can't write generic post-processing. |
+| **Output drift** | Same conceptual operation ("describe this table") returns different shapes per server. Agents can't write generic post-processing, and nothing is stable enough to commit. |
 
-`singularidade-data-bridge` is a **deliberately reduced** alternative aimed at the 80% of cases where the LLM only needs to **inspect or query**, not administer:
+`singularidade-data-bridge` is a **deliberately reduced** alternative aimed at the cases where the agent only needs to **inspect or query**, not administer:
 
-- **One fat JAR** (~24 MB) with five JDBC drivers shaded in (PostgreSQL, Firebird, Oracle, SQL Server, MySQL). One install, all five backends.
-- **One JSON contract** for `extract` (per-table metadata), `extract-all` (whole-schema snapshot + summary index), and `query` (free-form SELECT with column metadata). Same shape regardless of driver.
-- **Read-only by design.** `extract` collects no sample rows by default (PII-safe). `query` rejects DML/DDL unless `--writable`, and rejects DDL outright even then.
-- **Hermetic.** No daemon required (CLI per call); optional `serve` mode if you want connection pooling for repeated calls.
-- **Stable contracts** under semver — versioned JSON schemas, documented exit codes, no surprises.
+- **One fat JAR** (~19 MB) with five JDBC drivers shaded in (PostgreSQL, Firebird, Oracle, SQL Server, MySQL), plus a **catalog edition** without free-form SQL.
+- **One JSON contract** for `extract` / `extract-all` (per-table metadata + a summary index) and `query` / `run-query` (rows with column metadata). Same shape regardless of driver.
+- **Read-only by design.** No sample rows by default (PII-safe). `query` accepts one allowlisted statement and rejects DML unless `--writable`, and DDL always.
+- **Versionable.** `--stable` writes files you can commit and diff: no timestamps, no versions, no database-generated names, every list in a fixed order.
+- **Stable contracts** under semver — versioned JSON schemas, documented exit codes.
 
-It is **not** a full database admin tool. It will never manage indexes, copy data between databases, run backups, or modify schemas. For those, use the database-specific MCP server, `psql`/`sqlcmd`/`mysql`, Liquibase, Flyway, etc. The point is the **smaller surface**: one JAR, one contract, read-only-by-default.
+It is **not** a database admin tool. It will never manage indexes, copy data between databases, run backups or modify schemas. For those, use `psql`/`isql`/`sqlcmd`/`mysql`, Liquibase, Flyway, or the database-specific tooling.
 
 ---
 
 ## For LLM agents reading this
 
-If you're an AI agent deciding whether and how to use this tool:
-
 **Use `data-bridge` when:**
-- The user has a JDBC URL and you need to understand a table's schema (columns, types, FKs, indexes, constraints, statistics) — call `extract` or `extract-all`.
-- You need to test a SELECT query against the database before generating an MCP tool / ETL job / migration / report — call `query`.
-- You need a snapshot of an entire schema for diff-style comparison (CI drift detection, "schema-as-code") — call `extract-all` and commit `_index.json` + per-table folders.
+- You need the structure of one or more tables (columns, exact types, domains, keys, FKs, indexes, constraints, triggers, generators) — call `extract` (several `--table` in one call) or `extract-all`.
+- You need to test a SELECT before generating an MCP tool / ETL job / entity / report — call `query`.
+- You need a fixed lookup with parameters, such as reading a data dictionary table — put it in a queries file and call `run-query`.
+- You need a schema snapshot to commit for diffing (CI drift detection, "schema-as-code") — call `extract-all --stable` (or `extract --stable` for a list of tables).
 
 **Don't use `data-bridge` when:**
-- You need to modify schema (CREATE / DROP / ALTER) → use Liquibase, Flyway, or a database-specific migration tool. data-bridge will reject DDL even with `--writable`.
-- You need full DBA capabilities (manage indexes, RLS, copy between DBs, vacuum/analyze tuning) → use the DB-specific MCP server, `psql`, etc.
-- You need result streaming for large tables → data-bridge returns full result sets in one response (capped by `--limit`).
+- You need to change the schema (CREATE / DROP / ALTER) → Liquibase, Flyway or a migration tool. data-bridge rejects DDL even with `--writable`.
+- You need DBA work (manage indexes, RLS, vacuum, copy between databases) → the database's own tools.
+- You need result streaming for large result sets → data-bridge returns the result in one document (capped by `--limit`).
 
-**Default recipe for "understand + query" workflows:**
-1. Get a JDBC URL from the user (must include credentials inline: `jdbc:postgresql://host/db?user=u&password=p`).
-2. Discover what's there: `data-bridge list-tables --jdbc-url ... --schema X`.
-3. Get full structure for the relevant table: `data-bridge extract --jdbc-url ... --schema X --table Y --out /tmp/work/`. Read `/tmp/work/X.Y/metadata.json`.
-4. Test queries: `data-bridge query --jdbc-url ... --sql "SELECT ... LIMIT 10"`. Pipe stdout into your JSON parser.
-5. (Optional) For repeated calls, start `data-bridge serve --port 8765` once and use the HTTP API.
+**Default recipe:**
+1. Keep credentials out of the URL: `--jdbc-url jdbc:firebirdsql://host:3050//path/db.fdb --user ALICE --password-env DB_PASSWORD` (or `--password-file ~/.secrets/db`).
+2. Discover what's there: `data-bridge list-tables ...`.
+3. Get the structure: `data-bridge extract ... --table A --table B --out /tmp/work/ --cardinality-mode skip`. Read `/tmp/work/<table>/metadata.json` (and `ddl.sql`).
+4. Test queries: `data-bridge query ... --sql "SELECT ..."`, or fixed ones with `data-bridge run-query ... --file queries.sql --name colunas --param tabela=A`.
 
 **Safety rules already in effect — you don't have to enforce them yourself:**
-- `extract` collects **zero sample rows** unless you pass `--sample-rows N`. Default output is safe to commit alongside source.
-- `query` is **read-only** unless you pass `--writable`. SELECT/WITH/EXPLAIN/SHOW only.
-- DDL is **always rejected** (DROP, CREATE, ALTER, TRUNCATE, GRANT, REVOKE), even with `--writable`.
-- Multi-statement SQL is **always rejected** (`SELECT 1; DROP TABLE x` style injection patterns).
-- `password` in the JDBC URL is **auto-redacted** (`password=***`) in all output and error messages.
-- `columnStats` defaults to **`histogram-only`** — `mostCommonValues` and `mostCommonFrequencies` (PII risk) are zeroed unless `--column-stats-mode=full` is passed.
-- `source.url` defaults to **`host-port` redaction** — production hostname is replaced with `[redacted-host]` unless `--source-url-redaction=none` is passed.
-- `extract` (CLI) writes a sibling `ddl.sql` with the table's CREATE statements in native dialect (PG/MySQL/Oracle/Firebird; MSSQL placeholder for now).
+- `extract` collects **zero sample rows** unless you pass `--sample-rows N`.
+- `query` runs **one statement**, checked after comments and string literals are blanked out, so nothing can hide behind a comment.
+- Without `--writable`, only `SELECT` / `WITH` / `EXPLAIN` / `SHOW` run, and data-modifying clauses anywhere in them are rejected. On Firebird, `GEN_ID(g, n)` with `n ≠ 0` and `NEXT VALUE FOR` are rejected too (generators advance even inside read-only transactions).
+- DDL (`CREATE`, `ALTER`, `DROP`, `RECREATE`, `TRUNCATE`, `GRANT`, `REVOKE`, `COMMENT`, ...) and procedural / session statements (`EXECUTE BLOCK`, `EXECUTE`, `EXEC`, `CALL`, `DO`, `SET`) are **always rejected**, even with `--writable`.
+- `run-query` is always read-only and goes through the same guard.
+- The `password` in a JDBC URL is **redacted** (`password=***`) in all output and error messages. `source.url` additionally hides host and port by default.
+- `columnStats` defaults to **`histogram-only`** — `mostCommonValues` and `mostCommonFrequencies` (PII risk) are dropped unless `--column-stats-mode=full`.
+- The catalog JAR (`data-bridge-catalog-*.jar`) has **no `query` command at all**.
 
-**Output is stable JSON.** Every command writes JSON with documented schema (see [Output contracts](#output-contract-metadatajson)). Errors are uniform: `{"error": {"code": "...", "message": "...", "hint": "..."}}` on stderr (CLI) or response body (HTTP), with documented exit codes (CLI) and HTTP status (HTTP).
+**Output is stable JSON.** Errors are uniform: `{"error": {"code": "...", "message": "...", "hint": "..."}}` on stderr, with documented exit codes.
 
 ---
 
 ## Install
 
-### Option A — Download the release JAR (recommended)
+### Option A — Download a release JAR (recommended)
 
-Grab the latest fat JAR (~24 MB; bundles all five JDBC drivers):
+Each release publishes two fat JARs (~19 MB each; both bundle the five JDBC drivers):
+
+| JAR | Commands | When |
+|---|---|---|
+| `data-bridge-vX.Y.Z.jar` | `extract`, `extract-all`, `list-tables`, `query`, `run-query`, `version` | General use. |
+| `data-bridge-catalog-vX.Y.Z.jar` | `extract`, `extract-all`, `list-tables`, `run-query`, `version` | Catalog work where free-form SQL must not be possible. `version` prints `... (catalog)`. |
 
 ```bash
 LATEST=$(curl -s https://api.github.com/repos/singularidade-digital-dev/singularidade-data-bridge/releases/latest | jq -r .tag_name)
-curl -fLo data-bridge.jar \
-  "https://github.com/singularidade-digital-dev/singularidade-data-bridge/releases/download/${LATEST}/data-bridge-${LATEST}.jar"
-java -jar data-bridge.jar version
+BASE="https://github.com/singularidade-digital-dev/singularidade-data-bridge/releases/download/${LATEST}"
+curl -fL -O "${BASE}/data-bridge-${LATEST}.jar" -O "${BASE}/data-bridge-${LATEST}.jar.sha256"
+sha256sum -c "data-bridge-${LATEST}.jar.sha256"
+java -jar "data-bridge-${LATEST}.jar" version
 ```
 
-Each release also publishes a `.sha256` file next to the JAR — verify with `sha256sum -c data-bridge-${LATEST}.jar.sha256`.
+Replace `data-bridge-` with `data-bridge-catalog-` for the catalog edition.
 
 ### Option B — Build from source
 
-Requires JDK 21 and Maven. Docker is needed only if you want to run the integration tests.
+Requires JDK 21 and Maven. Docker is needed only for the integration tests.
 
 ```bash
 git clone https://github.com/singularidade-digital-dev/singularidade-data-bridge.git
 cd singularidade-data-bridge
-mvn -DskipTests package
+mvn -DskipTests package          # target/data-bridge.jar and target/data-bridge-catalog.jar
 java -jar target/data-bridge.jar version
 ```
 
@@ -101,263 +105,210 @@ java -jar target/data-bridge.jar version
 | | |
 |---|---|
 | Java runtime | 21+ (Temurin recommended) |
-| Disk | ~24 MB for the fat JAR |
+| Disk | ~19 MB per JAR |
 | Network | Only what your `--jdbc-url` needs |
-| Privileges | None — read-only operations only |
+| Privileges | Read-only. A database user with SELECT-only grants is the recommended setup. |
 
-The tool runs every connection with `setReadOnly(true)`. It never issues anything beyond `SELECT` and metadata queries.
+Every connection runs with `setReadOnly(true)` (PostgreSQL also gets `BEGIN READ ONLY`).
 
 ---
 
 ## Quick start
 
-The credentials in the examples below (`alice` / `s3cret`) are placeholders. Use a read-only database user of your own.
+The credentials in the examples (`alice` / `DB_PASSWORD`) are placeholders. Use a read-only database user of your own.
 
-### Extract a single table
+### Extract tables
 
 ```bash
+export DB_PASSWORD='...'
 java -jar data-bridge.jar extract \
-  --jdbc-url "jdbc:postgresql://host:5432/mydb?user=alice&password=s3cret&sslmode=require" \
+  --jdbc-url "jdbc:postgresql://host:5432/mydb?sslmode=require" \
+  --user alice --password-env DB_PASSWORD \
   --schema public \
-  --table customers \
+  --table customers --table orders \
   --out ./snapshot/
 ```
 
-Result: `./snapshot/public.customers/metadata.json`. Add `--tsv` for companion TSV files in the same directory. Add `--sample-rows 5` if you want 5 real rows under `sample` in the JSON (off by default — see [Known limitations](#known-limitations) about PII).
+Result: `./snapshot/public.customers/{metadata.json,ddl.sql}` and the same for `orders`. Names are resolved before anything is written: an exact match first, then the database's case for unquoted identifiers (`customers` finds `CUSTOMERS` on Firebird/Oracle). If any table is missing the run fails with exit 11 and lists them all. Use `--tables-file list.txt` for long lists (one name per line, `#` comments).
 
-### Extract every table in a schema
+### Extract every table, ready to commit
 
 ```bash
 java -jar data-bridge.jar extract-all \
-  --jdbc-url "jdbc:postgresql://host:5432/mydb?user=alice&password=s3cret" \
-  --schema public \
-  --out ./snapshot/
+  --jdbc-url "jdbc:firebirdsql://host:3050//data/sgh.fdb?encoding=WIN1252" \
+  --user SYSDBA --password-file ~/.secrets/sgh \
+  --include-triggers --stable \
+  --out ./db-snapshot/
 ```
 
-Iterates every table in the schema, writes one subdirectory per table (`./snapshot/public.<table>/metadata.json`), plus a top-level `./snapshot/_index.json` summary you can quickly diff or browse. Useful for the "schema-as-code" pattern — commit `./snapshot/` alongside your application's source so PRs surface schema drift.
+Writes one directory per table plus `./db-snapshot/_index.json`. With `--stable`, two runs against an unchanged database produce byte-identical files — see [Stable output](#stable-output---stable).
 
-### List tables in a schema
+### List tables
 
 ```bash
-java -jar data-bridge.jar list-tables \
-  --jdbc-url "jdbc:postgresql://host/mydb?user=alice&password=s3cret" \
-  --schema public
+java -jar data-bridge.jar list-tables --jdbc-url "jdbc:postgresql://host/mydb" --user alice --password-env DB_PASSWORD --schema public
 ```
 
-Prints a JSON array on stdout.
+Prints a JSON array on stdout (tables only, no views).
 
 ### Run a free-form SELECT
 
 ```bash
 java -jar data-bridge.jar query \
-  --jdbc-url "jdbc:postgresql://host:5432/mydb?user=alice&password=s3cret" \
+  --jdbc-url "jdbc:postgresql://host:5432/mydb" --user alice --password-env DB_PASSWORD \
   --sql "SELECT id, name FROM customers WHERE created_at > now() - interval '7 days' LIMIT 10"
 ```
 
-Prints JSON on stdout: `{ "kind": "query", "rowCount": 10, "columns": [...], "rows": [...] }`. Defaults are read-only (SELECT/WITH/EXPLAIN/SHOW only), `--limit 100`, `--timeout-sec 30`. Pass `--writable` to permit INSERT/UPDATE/DELETE; DDL is rejected unconditionally.
+Prints `{ "kind": "query", "rowCount": 10, "columns": [...], "rows": [...] }`.
 
-### Run as an HTTP daemon
+### Run a fixed, parameterized query from a file
 
-```bash
-java -jar data-bridge.jar serve --port 8765
+```sql
+-- dictionary.sql (versioned in your repository)
+-- name: tabela
+SELECT NOME, MODULO, DESCRICAO FROM TBSGHTABELAS WHERE NOME = :tabela
+
+-- name: colunas
+-- official column descriptions
+SELECT COLUNA, DESCRICAO FROM TBSGHCOLUNAS WHERE TABELA = :tabela ORDER BY COLUNA;
 ```
 
-Then from any client:
-
 ```bash
-curl -s http://localhost:8765/v1/health
-
-curl -s -X POST http://localhost:8765/v1/extract \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jdbcUrl": "jdbc:postgresql://host/mydb?user=alice&password=s3cret",
-    "schema": "public",
-    "table": "customers"
-  }' | jq .   # add "sampleRows": 5 in the body if you want sample data
-
-curl -s "http://localhost:8765/v1/list-tables?jdbcUrl=$(printf %s 'jdbc:postgresql://host/mydb?user=alice&password=s3cret' | jq -sRr @uri)&schema=public"
-
-curl -s -X POST http://localhost:8765/v1/query \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jdbcUrl": "jdbc:postgresql://host/mydb?user=alice&password=s3cret",
-    "sql": "SELECT id, name FROM customers LIMIT 10",
-    "limit": 100
-  }' | jq .   # add "writable": true to permit DML; DDL is rejected always
+java -jar data-bridge-catalog.jar run-query \
+  --jdbc-url "jdbc:firebirdsql://host:3050//data/sghlog.gdb" --user SYSDBA --password-env SGH_PASSWORD \
+  --file dictionary.sql --name colunas --param tabela=PRITENSESQ
 ```
 
-The daemon keeps one HikariCP pool per normalized JDBC URL. Idle pools are evicted after `--idle-timeout` (default 10 min). The JVM shutdown hook closes everything cleanly on `SIGTERM`.
+Same JSON as `query`. Placeholders are bound as JDBC parameters, so values never become SQL text.
 
 ---
 
 ## CLI reference
 
-### `extract` — full metadata + sample for one table
+### Connection options (every command)
+
+| Flag | Purpose |
+|---|---|
+| `--jdbc-url` | Required. JDBC URL; the driver is detected from the prefix. |
+| `--user` | Database user, when it is not in the URL. |
+| `--password-env VAR` | Read the password from environment variable `VAR`. |
+| `--password-file PATH` | Read the password from a file. Only a final line break is removed; everything else, spaces included, is part of the password. |
+
+Credentials given as flags are passed to the driver as connection properties. Giving the same credential in the URL **and** in a flag is an error (exit 2), as is giving both `--password-env` and `--password-file`, an unset variable or an empty file. A user in the URL with the password from a flag is fine.
+
+### `extract` — metadata (+ DDL) for one or more tables
 
 ```text
-data-bridge extract --jdbc-url <url> [--schema <name>] --table <name> --out <dir>
-                    [--sample-rows N] [--tsv] [--no-cardinality]
-                    [-q|--quiet] [-v|--verbose]
+data-bridge extract --jdbc-url <url> [credentials] [--schema <name>]
+                    (--table <name>)... [--tables-file <path>] --out <dir>
+                    [--sample-rows N] [--tsv] [--cardinality-mode exact|approximate|skip]
+                    [--column-stats-mode full|histogram-only|off] [--source-url-redaction none|host-port|full]
+                    [--include-ddl] [--include-triggers] [--stable] [-q|--quiet] [-v|--verbose]
 ```
 
 | Flag | Required | Default | Purpose |
 |---|---|---|---|
-| `--jdbc-url` | yes | — | Full JDBC URL. Driver auto-detected from the prefix. Credentials and SSL params are part of the URL. |
-| `--schema` | depends on driver | — | Required for PostgreSQL/Oracle/SQL Server. Ignored on Firebird/MySQL (single-schema). |
-| `--table` | yes | — | Table or view name. |
-| `--out` | yes | — | Output **parent** directory. The actual files are written under `<out>/<schema>.<table>/`. Created if missing. |
-| `--sample-rows` | no | `0` | Sample row count. **Default 0 = no sample collected.** Pass e.g. `--sample-rows 5` to include 5 real rows under `sample` in the JSON (PII-bearing — see limitations). |
+| `--schema` | depends on driver | — | Required for PostgreSQL/Oracle/SQL Server. Ignored on Firebird/MySQL (single-schema). A missing schema is exit 12. |
+| `--table` | one of `--table` / `--tables-file` | — | Table or view. Repeatable: `--table A --table B`. One JVM, one connection for all of them. |
+| `--tables-file` | | — | File with one table per line; blank lines and `#` comments ignored. Merged with `--table`, duplicates dropped. |
+| `--out` | yes | — | Output **parent** directory. Files go under `<out>/<schema>.<table>/` (or `<out>/<table>/` without schema), using the name as stored in the database. |
+| `--sample-rows` | no | `0` | Sample row count. **Default 0 = no sample collected.** PII-bearing when on. |
 | `--tsv` | no | off | Also emit `columns.tsv`, `fks.tsv`, `indexes.tsv`, `unique-constraints.tsv`, `check-constraints.tsv`, `sample.tsv`, `cardinality.tsv`. |
-| `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: read pre-computed statistics (`pg_class.reltuples`+`pg_stats` on PG; `RDB$INDICES.RDB$STATISTICS` on Firebird; sub-second on both). `skip`: emit empty cardinality. BLOB / CLOB / BYTEA columns are always omitted regardless of mode (one warning per skipped column). |
-| `--column-stats-mode` | no | `histogram-only` | Controls `columnStats` payload. `full` keeps `mostCommonValues`+`mostCommonFrequencies` (PII risk). `histogram-only` (default) zeros those, keeping aggregates. `off` makes `columnStats` empty. |
-| `--source-url-redaction` | no | `host-port` | How aggressively to scrub `source.url` in metadata.json. `none` keeps host:port (legacy). `host-port` (default) replaces host[:port] with `[redacted-host]`. `full` keeps only the JDBC scheme. |
-| `--include-ddl` | no | on | Write a sibling `ddl.sql` file with reconstructed CREATE TABLE/INDEX/etc. PG/MySQL/Oracle/Firebird produce real DDL; MSSQL produces a placeholder file. |
-| `--include-triggers` | no | off | Also write `triggers.sql` alongside `ddl.sql`. Off by default (trigger extraction can inflate the snapshot). |
+| `--cardinality-mode` | no | `exact` | `exact`: `COUNT(*)` + `COUNT(DISTINCT col)` per column — slow, authoritative. `approximate`: pre-computed statistics (`pg_class`/`pg_stats` on PG; `RDB$INDICES.RDB$STATISTICS` on Firebird). `skip`: empty cardinality. BLOB / CLOB / BYTEA / text-BLOB columns are always omitted. |
+| `--column-stats-mode` | no | `histogram-only` | `full` keeps `mostCommonValues` + `mostCommonFrequencies` (PII risk); `off` empties `columnStats`. |
+| `--source-url-redaction` | no | `host-port` | `none` keeps host:port, `host-port` replaces them with `[redacted-host]`, `full` keeps only the JDBC scheme. |
+| `--include-ddl` | no | on | Write `ddl.sql` next to `metadata.json`. |
+| `--include-triggers` | no | off | Also write `triggers.sql`. |
+| `--stable` | no | off | Versionable output (see [Stable output](#stable-output---stable)). Implies no cardinality and no column statistics; cannot be combined with `--sample-rows`. |
 | `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
-| `-q`, `--quiet` | no | off | Suppress per-step progress on stderr. Errors still reported. |
-| `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
+| `-q` / `-v` | no | off | Quiet progress / verbose errors (exception class + stack trace). |
 
-### `extract-all` — extract every table in a schema
+### `extract-all` — every table of a schema
 
 ```text
-data-bridge extract-all --jdbc-url <url> [--schema <name>] --out <dir>
-                        [--exclude TABLE]... [--include-views]
-                        [--sample-rows N] [--no-cardinality] [--tsv]
-                        [-q|--quiet] [-v|--verbose]
+data-bridge extract-all --jdbc-url <url> [credentials] [--schema <name>] --out <dir>
+                        [--exclude TABLE]... [--include-views] [same output flags as extract]
 ```
 
-Iterates every table in the schema (sequentially, single connection) and runs the same pipeline as `extract` for each. Writes:
-
-```
-<out>/
-├── _index.json                       ← schema-level summary (timestamp, source, table list with row/column counts)
-├── <schema>.<table_a>/
-│   ├── metadata.json
-│   └── *.tsv (if --tsv)
-└── <schema>.<table_b>/
-    └── ...
-```
-
-| Flag | Required | Default | Purpose |
-|---|---|---|---|
-| `--jdbc-url` | yes | — | Same as `extract`. |
-| `--schema` | depends on driver | — | Required for PostgreSQL/MySQL/Oracle/SQL Server; may be omitted only on Firebird (single-namespace). One schema per invocation; loop externally for multi-schema. |
-| `--out` | yes | — | Parent directory for the per-table subdirs and `_index.json`. |
-| `--exclude TABLE` | no | — | Skip a table by exact name. Repeatable: `--exclude audit_log --exclude staging`. |
-| `--include-views` | no | off | Also iterate views and materialized views (PG). Off by default = TABLE only. |
-| `--sample-rows N` | no | `0` | Same semantics as `extract`. Applies to every table. |
-| `--cardinality-mode` | no | **`approximate`** | **Different default vs `extract`** because the cost compounds across tables. `approximate` reads `pg_class.reltuples` + `pg_stats` (sub-second per table on PG). Use `exact` if you need authoritative counts; `skip` to omit cardinality entirely. |
-| `--column-stats-mode` | no | `histogram-only` | Controls `columnStats` payload. `full` keeps `mostCommonValues`+`mostCommonFrequencies` (PII risk). `histogram-only` (default) zeros those, keeping aggregates. `off` makes `columnStats` empty. |
-| `--source-url-redaction` | no | `host-port` | How aggressively to scrub `source.url` in metadata.json. `none` keeps host:port (legacy). `host-port` (default) replaces host[:port] with `[redacted-host]`. `full` keeps only the JDBC scheme. |
-| `--include-ddl` | no | on | Write a sibling `ddl.sql` file with reconstructed CREATE TABLE/INDEX/etc. PG/MySQL/Oracle/Firebird produce real DDL; MSSQL produces a placeholder file. |
-| `--include-triggers` | no | off | Also write `triggers.sql` alongside `ddl.sql`. Off by default (trigger extraction can inflate the snapshot). |
-| `--no-cardinality` | no | off | Legacy alias for `--cardinality-mode skip`. |
-| `--tsv` | no | off | Companion TSVs in each per-table directory. |
-
-The `_index.json` shape:
+Runs the `extract` pipeline for every table (sequentially, one connection) and writes `<out>/_index.json`:
 
 ```json
 {
-  "$schema":     "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
-  "version":     "1.0",
-  "generatedAt": "2026-05-10T12:00:00Z",
-  "generator":   { "name": "singularidade-data-bridge", "version": "0.7.0" },
-  "source":      { "type": "jdbc", "driver": "postgresql",
-                   "url": "jdbc:postgresql://...?password=***", "schema": "public" },
-  "tableCount":  12,
-  "tables": [
-    { "schema": "public", "table": "customers", "type": "TABLE",
-      "columnCount": 9, "primaryKey": ["id"], "totalRows": 18432 }
-  ]
+  "$schema":    "https://singularidade.digital/data-bridge/extract-all-index.v1.json",
+  "version":    "1.0",
+  "generatedAt": "2026-10-22T12:00:00Z",
+  "generator":  { "name": "singularidade-data-bridge", "version": "0.8.0" },
+  "source":     { "type": "jdbc", "driver": "postgresql", "url": "jdbc:postgresql://[redacted-host]/mydb", "schema": "public" },
+  "tableCount": 12,
+  "tables": [ { "schema": "public", "table": "customers", "type": "TABLE", "columnCount": 9, "primaryKey": ["id"], "totalRows": 18432 } ]
 }
 ```
 
-CI tip: diff two `_index.json` snapshots (today vs. previous deploy) to surface row-count drift, new tables, dropped columns, etc., without parsing every per-table `metadata.json`.
+Differences from `extract`: `--schema` is required except on Firebird; `--cardinality-mode` defaults to **`approximate`**; `--exclude` skips tables by exact name (repeatable); `--include-views` adds views and materialized views.
 
 ### `query` — execute one SQL statement
 
 ```text
-data-bridge query --jdbc-url <url> --sql "<SQL>"
-                  [--limit 100] [--timeout-sec 30] [--writable]
-                  [--out file.json]
-                  [-q|--quiet] [-v|--verbose]
+data-bridge query --jdbc-url <url> [credentials] --sql "<SQL>"
+                  [--limit 100] [--timeout-sec 30] [--writable] [--out file.json] [-q] [-v]
 ```
 
-Defense-in-depth, in order:
+The statement guard works on a copy of the SQL in which comments, string literals, quoted identifiers and PostgreSQL dollar-quoted bodies are blanked out — so a keyword or a `;` inside them neither hides a statement nor causes a false alarm:
 
-1. **Multi-statement input is rejected** (`SELECT 1; DROP TABLE x` style).
-2. **DDL is rejected unconditionally** (`DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`) — even with `--writable`. Use Liquibase/Flyway for schema changes.
-3. **Without `--writable`, only SELECT / WITH / EXPLAIN / SHOW** are accepted (read-only mode also flips `connection.setReadOnly(true)`, which the database driver enforces where supported).
-4. With `--writable`, **DML is allowed** (INSERT/UPDATE/DELETE) but DDL still rejected.
-5. **Recommended on top of all of the above:** point `--jdbc-url` at a database role with `GRANT SELECT` only — the only defense that actually binds against an adversary, vs. the layers above which guard against accidents.
-
-| Flag | Required | Default | Purpose |
-|---|---|---|---|
-| `--jdbc-url` | yes | — | Full JDBC URL with credentials inline. |
-| `--sql` | yes | — | The SQL to execute. Must be a single statement. |
-| `--limit` | no | `100` | Max rows returned. The driver gets `setMaxRows(limit+1)` so the result is marked `truncated=true` if more rows exist. |
-| `--timeout-sec` | no | `30` | JDBC query timeout in seconds. `0` = no timeout. |
-| `--writable` | no | off | Permit INSERT/UPDATE/DELETE. DDL still rejected. |
-| `--out` | no | stdout | Write JSON result to this file path instead of stdout. Use `-` for explicit stdout. |
-| `-q`, `--quiet` | no | off | Suppress "wrote /path" message on stderr when `--out` is used. |
-| `-v`, `--verbose` | no | off | Include exception class + message in error JSON; print stack traces. |
-
-Output shape (always JSON):
-
-```json
-{
-  "kind": "query",
-  "rowCount": 10,
-  "truncated": false,
-  "columns": [
-    { "name": "id",   "sqlType": "bigint",       "jdbcType": -5 },
-    { "name": "name", "sqlType": "varchar(200)", "jdbcType": 12 }
-  ],
-  "rows": [
-    { "id": 1, "name": "ALICE" }
-  ],
-  "executionTimeMs": 13,
-  "warnings": []
-}
-```
-
-For `--writable` UPDATE/INSERT/DELETE statements, the shape is:
-
-```json
-{
-  "kind": "update",
-  "updateCount": 5,
-  "executionTimeMs": 22,
-  "warnings": []
-}
-```
-
-### `list-tables` — list table names in a schema
-
-```text
-data-bridge list-tables --jdbc-url <url> [--schema <name>]
-```
-
-Prints a JSON array of table names to stdout. Always TABLE only (no views).
-
-### `serve` — start the HTTP daemon
-
-```text
-data-bridge serve [--host 127.0.0.1] [--port 8765] [--max-pool 5] [--idle-timeout 10m]
-```
+1. **One statement.** A second statement anywhere is rejected; one trailing `;` is fine.
+2. **Allowlisted first keyword.** `SELECT`, `WITH`, `EXPLAIN`, `SHOW`; with `--writable` also `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `UPSERT`, `REPLACE`. DDL keeps its own message; anything else (`EXECUTE BLOCK`, `EXECUTE`, `EXEC`, `CALL`, `DO`, `SET`, ...) is rejected even with `--writable`.
+3. **Read-only means read-only.** Without `--writable`, a data-modifying clause anywhere (e.g. `WITH x AS (...) DELETE ...`) is rejected, and on Firebird so are `GEN_ID(g, n)` with `n ≠ 0` and `NEXT VALUE FOR`. Use `GEN_ID(g, 0)` to read a generator.
+4. **The connection is read-only too** (`setReadOnly(true)`; PostgreSQL `BEGIN READ ONLY`). Firebird enforces it: a selectable procedure that writes fails.
+5. **Recommended on top:** a database user with SELECT-only grants — the only layer that binds against an adversary.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--host` | `127.0.0.1` | Interface to bind. Loopback by default because the daemon has no authentication; use `0.0.0.0` only behind a firewall or an authenticating proxy. |
-| `--port` | `8765` | TCP port to listen on. Use `0` for an ephemeral port (printed to stderr). |
-| `--max-pool` | `5` | Max HikariCP connections per unique JDBC URL. |
-| `--idle-timeout` | `10m` | Pools idle longer than this are closed and evicted. Accepts `ms`, `s`, `m`, `h` suffixes. |
+| `--sql` | — | Required. One statement. |
+| `--limit` | `100` | Max rows returned. The driver gets `setMaxRows(limit+1)`, so `truncated=true` tells you more rows exist. |
+| `--timeout-sec` | `30` | JDBC query timeout; `0` = none. |
+| `--writable` | off | Permit DML. DDL and procedural statements are still rejected. |
+| `--out` | stdout | Write the JSON to a file (`-` = stdout). |
 
-### `version` — print version and exit
+Output:
+
+```json
+{
+  "kind": "query", "rowCount": 1, "truncated": false,
+  "columns": [ { "name": "id", "sqlType": "bigint", "jdbcType": -5 } ],
+  "rows": [ { "id": 1 } ],
+  "executionTimeMs": 13, "warnings": []
+}
+```
+
+With `--writable` DML the shape is `{ "kind": "update", "updateCount": 5, "executionTimeMs": 22, "warnings": [] }`.
+
+### `run-query` — a named query from a file
+
+```text
+data-bridge run-query --jdbc-url <url> [credentials] --file <queries.sql> --name <id>
+                      [--param KEY=VALUE]... [--limit 100] [--timeout-sec 30] [--out file.json] [-q] [-v]
+```
+
+- **File format:** blocks introduced by a line `-- name: <id>`; comment lines right after it are a description; one statement per block; a trailing `;` is optional. Only comments and blank lines may precede the first block. Duplicate names and empty blocks are errors.
+- **Placeholders:** `:key` anywhere in code. Inside string literals, comments and quoted identifiers they are text, and PostgreSQL's `::type` cast is left alone. A name used twice is bound twice.
+- **Values** are converted to the type the driver reports for each placeholder (integers, decimals, booleans, `yyyy-mm-dd` dates, `yyyy-mm-dd hh:mm:ss` timestamps — a plain date means midnight — text otherwise). A value that does not convert is exit 2.
+- **Always read-only**, through the same guard as `query`. Missing or unknown parameters and unknown names are exit 2 (the error lists the available names).
+- Keep the queries file in the consumer's repository: it is reviewed like code, which is what makes it safer than free-form SQL.
+
+### `list-tables`
+
+```text
+data-bridge list-tables --jdbc-url <url> [credentials] [--schema <name>] [-v]
+```
+
+Prints a JSON array of table names (no views). A missing schema is exit 12.
+
+### `version`
 
 ```text
 data-bridge version
-# → singularidade-data-bridge 0.7.1
+# → singularidade-data-bridge 0.8.0            (full JAR)
+# → singularidade-data-bridge 0.8.0 (catalog)  (catalog JAR)
 ```
 
 ### Exit codes
@@ -366,226 +317,188 @@ data-bridge version
 |---|---|
 | `0` | Success |
 | `1` | Unspecified / unclassified error |
-| `2` | Invalid arguments (rejected by picocli) |
+| `2` | Invalid arguments: bad flags, conflicting credentials, rejected SQL, bad `run-query` file or parameters |
 | `10` | Connection failed (URL, driver, auth, network, TLS) |
-| `11` | Table not found |
+| `11` | Table not found — every missing name is listed; nothing is written |
 | `12` | Schema not found |
 | `13` | Query failed mid-pipeline (timeout, permission, syntax) |
 | `14` | Output write failed (disk full, permission) |
-| `64` | Unsupported (driver-specific feature unavailable in MVP) |
+| `64` | Unsupported (driver-specific feature unavailable) |
 
-When something fails, a single JSON document is written to **stderr** and the process exits with the matching code:
-
-```json
-{
-  "error": {
-    "code": "TABLE_NOT_FOUND",
-    "message": "Table 'public.customers' not found",
-    "hint": "Run `data-bridge list-tables ...` to discover available tables"
-  }
-}
-```
-
----
-
-## HTTP API
-
-Same pipeline as the CLI; same JSON output. Ideal for repeated calls because credentials and connections are pooled.
-
-| Method | Path | Body / Query | Response |
-|---|---|---|---|
-| `GET` | `/v1/health` | — | `200 {"status":"ok"}` |
-| `GET` | `/v1/version` | — | `200 {"name":"singularidade-data-bridge","version":"0.7.1"}` |
-| `GET` | `/v1/list-tables` | query: `jdbcUrl` (required), `schema` (optional) | `200 ["table1","table2",…]` |
-| `POST` | `/v1/extract` | body: `ExtractRequest` (see below) | `200` `metadata.json` body |
-| `POST` | `/v1/query` | body: `QueryRequest` (see below) | `200` `QueryResult` body |
-
-`ExtractRequest`:
+Errors go to **stderr** as one JSON document:
 
 ```json
-{
-  "jdbcUrl": "jdbc:postgresql://host/db?user=u&password=p",
-  "schema": "public",
-  "table": "customers",
-  "sampleRows": 0,
-  "cardinalityMode": "exact",
-  "skipCardinality": false,
-  "columnStatsMode": "histogram-only",
-  "sourceUrlRedaction": "host-port"
-}
+{ "error": { "code": "TABLE_NOT_FOUND",
+             "message": "table(s) not found: NAOEXISTE, OUTRA",
+             "hint": "Run `data-bridge list-tables` to see the available tables; names match exactly, then in the database's default case" } }
 ```
-
-`sampleRows` defaults to `0` (no sample collected — see [Known limitations](#known-limitations)), `cardinalityMode` defaults to `"exact"` (other values: `"approximate"`, `"skip"`), `skipCardinality` is the legacy alias and wins if `true`, `columnStatsMode` defaults to `"histogram-only"` (other values: `"full"`, `"off"`), `sourceUrlRedaction` defaults to `"host-port"` (other values: `"none"`, `"full"`), `schema` may be omitted for single-schema drivers.
-
-`QueryRequest`:
-
-```json
-{
-  "jdbcUrl": "jdbc:postgresql://host/db?user=u&password=p",
-  "sql": "SELECT id, name FROM customers LIMIT 10",
-  "limit": 100,
-  "timeoutSec": 30,
-  "writable": false
-}
-```
-
-All fields except `jdbcUrl` and `sql` are optional with the documented defaults. Same defense layers as the CLI: multi-statement / DDL rejected always; non-SELECT only when `writable=true`. The response is identical to what the CLI writes (`{kind, rowCount, columns, rows, ...}` for queries; `{kind, updateCount, ...}` for updates).
-
-### HTTP status code mapping
-
-| Status | Meaning |
-|---|---|
-| `200` | Success |
-| `400` | Invalid request body / missing required field |
-| `404` | Table or schema not found |
-| `500` | Internal data-bridge error / output write failed |
-| `501` | Unsupported (driver-specific feature unavailable) |
-| `502` | Connection or query failed downstream |
 
 ---
 
 ## Output contract (`metadata.json`)
 
-The full schema is documented in [`docs/superpowers/specs/2026-05-09-singularidade-data-bridge-design.md`](docs/superpowers/specs/2026-05-09-singularidade-data-bridge-design.md) §5. Top-level shape:
+Contract version **1.1**. Additive changes bump the minor version; removals or renames bump to `2.0`. Consumers must tolerate unknown fields.
 
 ```json
 {
   "$schema":  "https://singularidade.digital/data-bridge/metadata.v1.json",
-  "version":  "1.0",
-  "generatedAt": "2026-05-09T15:42:11Z",
-  "generator": { "name": "singularidade-data-bridge", "version": "0.7.0" },
-  "source":   { "type": "jdbc", "driver": "postgresql",
-                "url": "jdbc:postgresql://...?password=***",
-                "schema": "public", "table": "customers" },
-  "tableInfo":         { "type": "TABLE", "comment": "...", "owner": "...",
-                         "approximateRowCount": 18432, "viewDefinition": null },
-  "columns":           [ /* ordinal-ordered, with sqlType, nullability,
-                            primaryKey flag, default, comment, generated info */ ],
-  "primaryKey":        ["id"],
-  "foreignKeys":       [ /* each FK includes a 1-deep snapshot of the referenced
-                            table's columns under refTableColumns */ ],
-  "indexes":           [ /* with method (btree/hash/...) and partial WHERE for PG */ ],
-  "uniqueConstraints": [ ],
-  "checkConstraints":  [ ],
-  "sample":            { "rowCount": 5,             /* 0 unless --sample-rows N */
-                         "rows":     [ { "col1": ..., "col2": ... }, ... ] },
-  "columnStats":       [ /* pg_stats; empty array on non-PG drivers */ ],
-  "cardinality":       { "totalRows": 18432,
-                         "perColumn": [ { "name": "id",
-                                          "distinctCount": 18432,
-                                          "nullCount":     0 } ] },
-  "partitioning":      { "isPartitioned": false, "strategy": null,
-                         "partitionKey": [], "parent": null, "children": [] },
-  "warnings":          [ /* free-form; e.g. when columnStats is unavailable */ ]
+  "version":  "1.1",
+  "generatedAt": "2026-10-22T15:42:11Z",
+  "generator": { "name": "singularidade-data-bridge", "version": "0.8.0" },
+  "source":   { "type": "jdbc", "driver": "firebird", "url": "jdbc:firebirdsql://[redacted-host]//data/sgh.fdb",
+                "schema": null, "table": "PRITENSESQ" },
+  "tableInfo":         { "type": "TABLE", "comment": "...", "owner": null, "approximateRowCount": null, "viewDefinition": null },
+  "columns":           [ /* by position — see below */ ],
+  "primaryKey":        ["ID"],
+  "foreignKeys":       [ /* fkColumns, refTable, refColumns, onUpdate, onDelete, refTableColumns (1-deep snapshot) */ ],
+  "indexes":           [ /* columns, ordinalAsc, unique, primary, method, where, expression, active, constraint */ ],
+  "uniqueConstraints": [ { "name": "UK_PRITENSESQ_EXT", "columns": ["CODEXT", "EMPRESA"] } ],
+  "checkConstraints":  [ { "name": "CK_PRITENSESQ_PERC", "definition": "(PERC BETWEEN 0 AND 100)" } ],
+  "triggers":          [ { "name": "TRG_PRITENSESQ_BIU", "timing": "BEFORE", "events": ["INSERT", "UPDATE"],
+                           "position": 0, "active": true, "body": "AS\nBEGIN\n ...\nEND",
+                           "generators": ["GEN_IDITENSESQ"] } ],
+  "sample":            { "rowCount": 0, "rows": [] },
+  "columnStats":       [ /* pg_stats; empty on other drivers */ ],
+  "cardinality":       { "totalRows": 18432, "perColumn": [ { "name": "ID", "distinctCount": 18432, "nullCount": 0 } ] },
+  "partitioning":      { "isPartitioned": false, "strategy": null, "partitionKey": [], "parent": null, "children": [] },
+  "warnings":          [ ]
 }
 ```
 
-**Versioning.** Additive changes (new fields) bump to `1.x`; removals or renames bump to `2.0`. Producers and consumers must tolerate `additionalProperties`. BLOB/binary cells are normalized to `{ "_blob": true, "size": N, "preview": "<base64 of first 64 bytes>" }`.
+A column:
 
-**Atomic writes.** The CLI writes to `.metadata.json.partial` first, then renames atomically. You will never see a half-written `metadata.json`.
+```json
+{
+  "name": "ATIVO", "ordinalPosition": 5,
+  "sqlType": "char(1)", "jdbcType": 1, "nullable": false, "primaryKey": false,
+  "characterMaxLength": 1, "numericPrecision": null, "numericScale": null,
+  "default": "'F'", "comment": null,
+  "generated": { "isIdentity": false, "isComputed": false, "generationExpression": null },
+  "sequence":  null,
+  "collation": "ISO8859_1",
+  "nativeType": "CHAR(1)",
+  "charset":   "ISO8859_1",
+  "domain":    { "name": "DM_FLAG", "notNull": true, "default": "'F'", "check": "(VALUE IN ('T','F'))" }
+}
+```
+
+Fields added in 1.1 — filled by the Firebird source, `null` / `[]` on other drivers:
+
+| Field | Meaning |
+|---|---|
+| `columns[].nativeType` | Type exactly as declared: `NUMERIC(15,2)`, `DECIMAL(4,2)`, `VARCHAR(60)` (characters, not bytes), `BLOB SUB_TYPE TEXT`. |
+| `columns[].charset` / `collation` | Character set and effective collation of text columns. |
+| `columns[].domain` | The named domain behind the column, with its own NOT NULL, DEFAULT and CHECK. `nullable` and `default` remain the effective values. |
+| `columns[].sequence` | Generator that fills the column: `{"name", "schema", "source": "identity" or "trigger", "trigger"}`. Only identity columns and triggers that assign `NEW.<col> = GEN_ID(<gen>, ...)` / `NEXT VALUE FOR <gen>` count — never a guess by name. |
+| `columns[].generated.generationExpression` | `COMPUTED BY` expression. |
+| `indexes[].expression` / `active` / `constraint` | Expression indexes (with `columns: []`), inactive indexes, and the PK/UNIQUE/FK an index backs. |
+| `triggers[]` | Timing, events in order, position, active flag, body, and the generators the trigger depends on. |
+| `uniqueConstraints[]` / `checkConstraints[]` | Now filled on Firebird (were PostgreSQL-only). |
+
+On Firebird a text BLOB has `sqlType` `text` and other BLOBs `blob`.
+
+BLOB/binary sample cells are normalized to `{ "_blob": true, "size": N, "preview": "<base64 of first 64 bytes>" }`. Files are written atomically (`.metadata.json.partial` then rename).
+
+### Stable output (`--stable`)
+
+For committing snapshots. The same contract, minus what changes between runs or databases:
+
+- removed: `generatedAt`, `generator`, `source.url`, `warnings`, `sample`, `columnStats`, `cardinality`, `tableInfo.approximateRowCount`, `foreignKeys[].refTableColumns`;
+- names the database generated (Firebird `INTEG_n`, `RDB$PRIMARYn`, `RDB$FOREIGNn`, `RDB$n`) become `null`;
+- every list in a fixed order: columns by position, foreign keys by (refTable, fkColumns), indexes by (name, columns), unique constraints by columns, checks by definition, triggers by (timing, position, name);
+- `_index.json` drops `generatedAt`, `generator`, `source.url` and `totalRows`;
+- `ddl.sql` / `triggers.sql` headers drop version, source, server and timestamp.
+
+Two runs against an unchanged database produce byte-identical files.
 
 ---
 
 ## DDL output (`ddl.sql`)
 
-When `--include-ddl` is on (default), each per-table directory gets a `ddl.sql` file alongside `metadata.json`. The file contains the table definition in the **native dialect of the source database** — replay-able with the appropriate client (`psql -f`, `mysql <`, `sqlplus @`, `isql -i`).
+With `--include-ddl` (default) each table directory gets a `ddl.sql` in the database's own dialect, with a provenance header listing what was included and skipped.
 
-Each `ddl.sql` starts with a standard provenance header:
+| Driver | Source | Notes |
+|---|---|---|
+| PostgreSQL | `pg_get_indexdef` / `pg_get_constraintdef` + reconstruction | columns, defaults, IDENTITY, PK/UNIQUE inline, CHECK/FK, indexes, comments, views; triggers with `--include-triggers` |
+| Firebird | the `RDB$` catalog (same reader as `metadata.json`) | see below — **replays with `isql`** |
+| MySQL | `SHOW CREATE TABLE` / `SHOW CREATE VIEW` | |
+| Oracle | `DBMS_METADATA.GET_DDL` | |
+| SQL Server | placeholder file | |
 
-```sql
--- Generated by singularidade-data-bridge 0.7.0
---   source:    jdbc:postgresql://[redacted-host]/orgen
---   server:    PostgreSQL 14.10 on x86_64-pc-linux-gnu
---   schema:    atl   table: cliente   driver: postgresql
---   timestamp: 2026-05-11T15:30:00Z
--- Included: CREATE TABLE, CREATE INDEX, FOREIGN KEY / CHECK constraints, COMMENT ON
--- Skipped:  triggers (use --include-triggers), RLS policies, GRANT/REVOKE, functions/procedures
-```
+**Firebird**, in this order:
 
-The header lists exactly what was extracted vs skipped, so consumers know whether the script is replay-complete or partial.
+1. Shared objects the table uses — `CREATE DOMAIN` (with charset, default, NOT NULL, CHECK, collation) and `CREATE SEQUENCE` for generators its triggers use. They are shared by the whole database: create each once when replaying several tables.
+2. `CREATE TABLE` — exact types (`NUMERIC(p,s)`, text lengths in characters), domain-based columns by domain name, `CHARACTER SET` when it differs from the database default, `COLLATE` when it differs from the charset default, `COMPUTED BY`, `GENERATED BY DEFAULT AS IDENTITY` (FB3) / `ALWAYS` (FB4+), PK and UNIQUE inline in key order (with `USING [DESC] INDEX` when the index is named differently or descending).
+3. `CREATE [UNIQUE] [DESCENDING] INDEX` for indexes that back no constraint (expression indexes as `COMPUTED BY`), then `ALTER INDEX ... INACTIVE` for inactive ones.
+4. Foreign keys, with `ON DELETE` / `ON UPDATE` only for CASCADE, SET NULL and SET DEFAULT (`RESTRICT` is Firebird's stored default and is not valid DDL).
+5. CHECK constraints; then `COMMENT ON TABLE` / `COLUMN`.
 
-**Driver coverage:** see [Driver matrix](#driver-matrix) below. PG/MySQL/Oracle/Firebird produce real DDL in v0.7.0; MSSQL produces a placeholder file (real impl deferred to v0.8.0).
-
-**Limits documented in the header per driver:**
-
-| Driver | Always included | Optional / opt-in | Never included |
-|---|---|---|---|
-| PG | columns, defaults, IDENTITY, PK/UNIQUE inline, CHECK/FK as ALTER, INDEXes, COMMENT, VIEW | triggers (`--include-triggers`), GENERATED (PG 12+) | RLS policies, GRANT/REVOKE, functions/procedures |
-| MySQL | full `SHOW CREATE TABLE` output (incl. ENGINE/CHARSET/ROW_FORMAT) | triggers | GRANT/REVOKE, functions/procedures |
-| Oracle | full `DBMS_METADATA.GET_DDL` output for TABLE/INDEX | triggers | GRANT/REVOKE, RLS/VPD policies |
-| Firebird | columns, types, defaults, IDENTITY (FB 3+), PK/UNIQUE inline, CHECK/FK as ALTER, INDEXes, COMMENT | triggers, GENERATED (FB 4+) | GRANT/REVOKE, autonomous generators |
-| MSSQL | (v0.7.0: placeholder; v0.8.0 planned) | — | — |
+Names the database generated are never written, so replaying lets Firebird assign fresh ones. `triggers.sql` is a `SET TERM ^ ;` block of `CREATE OR ALTER TRIGGER "T" FOR "TABLE" ACTIVE|INACTIVE BEFORE INSERT OR UPDATE POSITION n`. The test suite replays every fixture table into an empty Firebird 3 and Firebird 5 database and requires the copy's catalog to match the original's.
 
 ---
 
 ## Driver matrix
 
-| Driver | URL prefix | IT coverage | `--cardinality-mode approximate` | `--include-ddl` | Notes |
+| Driver | URL prefix | Integration tests | `approximate` cardinality | DDL | Notes |
 |---|---|---|---|---|---|
-| PostgreSQL | `jdbc:postgresql:` | ✅ Full (Postgres Testcontainer) | ✅ via `pg_class.reltuples` + `pg_stats` | ✅ via `pg_get_indexdef`/`pg_get_constraintdef` + reconstruction | floor PG 11; PG 12+ for GENERATED columns |
-| Firebird | `jdbc:firebirdsql:` | ✅ Cardinality + DDL ITs (jacobalberty/firebird Testcontainer) | ✅ via `RDB$INDICES.RDB$STATISTICS` reciprocal — only **indexed** columns | ✅ via RDB$ reconstruction | floor FB 3 |
-| Oracle | `jdbc:oracle:` | ⚠️ Driver-load smoke only | ❌ planned | ✅ via `DBMS_METADATA.GET_DDL` | floor 12c |
-| SQL Server | `jdbc:sqlserver:` | ⚠️ Driver-load smoke only | ❌ planned | ⚠️ Placeholder (planned v0.8.0) | floor 2017 |
-| MySQL | `jdbc:mysql:` | ⚠️ Driver-load smoke only | ❌ planned (only indexed columns will be supported via `INFORMATION_SCHEMA.STATISTICS`) | ✅ via `SHOW CREATE TABLE` | floor 5.7 |
+| PostgreSQL | `jdbc:postgresql:` | ✅ Testcontainer (`postgres:16`) | ✅ `pg_class.reltuples` + `pg_stats` | ✅ | floor PG 11; PG 12+ for GENERATED columns |
+| Firebird | `jdbc:firebirdsql:` | ✅ Testcontainer (`firebirdsql/firebird:3.0.14`, smoke on `5.0.4`) with an SGH-like schema | ✅ `RDB$INDICES.RDB$STATISTICS` — only **indexed** columns | ✅ replayable | **Firebird 3+**; domains, charsets, triggers, generators in `metadata.json` |
+| Oracle | `jdbc:oracle:` | ⚠️ driver-load smoke | ❌ | ✅ `DBMS_METADATA` | floor 12c |
+| SQL Server | `jdbc:sqlserver:` | ⚠️ driver-load smoke | ❌ | ⚠️ placeholder | floor 2017 |
+| MySQL | `jdbc:mysql:` | ⚠️ driver-load smoke | ❌ | ✅ `SHOW CREATE TABLE` | floor 5.7 |
 
-All five drivers are shaded into the fat JAR and verified loadable via per-driver smoke tests. Live integration tests against Oracle/SQL Server/MySQL land when there's a real consumer.
-
-For drivers that don't expose a feature (e.g. `pg_stats` is PG-only, `RDB$STATISTICS` is Firebird-only), the corresponding section of `metadata.json` is empty and a `warnings` entry explains why.
+Where a driver does not expose a feature, the section is empty and a `warnings` entry explains why.
 
 ### Operator visibility (PG)
 
-When `data-bridge` opens a PostgreSQL connection, it sets `application_name=data-bridge/<version>` so you can identify and audit its sessions:
+PostgreSQL connections set `application_name=data-bridge/<version>`:
 
 ```sql
-SELECT application_name, state, query_start, backend_xmin
-  FROM pg_stat_activity
- WHERE application_name LIKE 'data-bridge%';
+SELECT application_name, state, query_start FROM pg_stat_activity WHERE application_name LIKE 'data-bridge%';
 ```
 
-Each `extract`, `extract-all`, or `query` invocation uses **exactly one connection** for the whole run. If you see multiple, you have multiple invocations live. The CLI's connection is closed cleanly on normal exit and on most exceptions.
+Each invocation uses exactly one connection for the whole run.
 
 ---
 
 ## Known limitations
 
-- **Cardinality cost (mitigated by `--cardinality-mode`).** Exact mode runs `COUNT(*)` plus `COUNT(DISTINCT col)` per non-BLOB column, sequentially. On a 50 M-row table with 30 columns, a single `extract --cardinality-mode exact` can take tens of minutes. For PostgreSQL, prefer `--cardinality-mode approximate` (sub-second; reads `pg_class.reltuples` + `pg_stats`) — `extract-all` already defaults to it. BLOB / CLOB / BYTEA columns are always omitted from per-column cardinality regardless of mode (each emits a warning).
-- **No `--where` filter (yet).** Sample and cardinality reflect the entire table. The caller is responsible for scoping (e.g. point at a single-tenant database, or wait for `--where` post-MVP).
-- **Sample data is opt-in and NOT redacted.** Sample collection is off by default (`--sample-rows 0`). When you opt in (`--sample-rows N`), the resulting `metadata.json` contains real database rows — including any PII present (CPFs, names, emails, etc.). For the "schema-as-code" workflow (committing `_index.json`/per-table `metadata.json` alongside source code), keep `--sample-rows 0` and the output is safe to version-control. For ad-hoc inspection (`--sample-rows 5`), point `--out` at an ephemeral directory and don't commit. The `password` query parameter in the source URL **is** redacted (replaced with `***`) in `metadata.json`, in stderr logs, and in error messages.
-- **No authentication on `serve` mode.** The daemon binds to loopback (`127.0.0.1`) by default. Binding to another interface (`--host 0.0.0.0`) exposes every connected database to whoever can reach the port — do it only behind a firewall, or front the daemon with a reverse proxy if you need TLS or auth.
-- **Read-only enforcement is best-effort.** The tool issues `setReadOnly(true)` on every connection and only ever runs metadata queries and `SELECT`s, but it does not run with a database role that mechanically forbids writes. If you want hard guarantees, give it a read-only DB user.
+- **Cardinality cost.** `--cardinality-mode exact` runs `COUNT(*)` plus `COUNT(DISTINCT col)` per column, sequentially — minutes on large tables. Prefer `approximate` or `skip` (`extract-all` defaults to `approximate`; `--stable` skips it).
+- **Generators used only by the application are invisible.** Firebird records which generators a trigger uses, not which ones client code calls. A column filled by `SELECT GEN_ID(...)` in application code has `sequence: null`; a trigger that assigns through a variable or a procedure lists the generator under `triggers[].generators` but links no column.
+- **Sample syntax.** `--sample-rows` uses `LIMIT` (PostgreSQL, MySQL) or `FIRST` (Firebird); Oracle and SQL Server are not covered yet.
+- **Sample data is opt-in and NOT redacted.** When you pass `--sample-rows N`, `metadata.json` contains real rows, PII included. Keep it off for anything you commit.
+- **The SQL guard protects against accidents, not adversaries.** A `SELECT` can still call a function that writes on drivers without read-only transactions. Use a SELECT-only database user for real enforcement.
+- **No HTTP daemon.** `serve` was removed in 0.8.0; every command is a one-shot CLI call.
 
 ---
 
 ## Architecture
 
 ```
-   ┌──────────────┐     ┌──────────────┐
-   │  CLI (picocli)│     │ HTTP (Javalin)│
-   └──────┬───────┘     └──────┬───────┘
-          │                    │
-          └─────────┬──────────┘
-                    │
-            ┌───────▼────────┐
-            │ MetadataPipeline│   11 sequential extractors
-            │  (orchestrator) │
-            └───────┬────────┘
-                    │
-            ┌───────▼────────┐
-            │     Source     │   interface (extension point:
-            │   (interface)  │    REST / GraphQL / file later)
-            └───────┬────────┘
-                    │
-            ┌───────▼────────┐
-            │   JdbcSource   │   single JDBC impl, per-driver
-            │ + DriverHints  │   quirks via DriverHints enum
-            └────────────────┘
+            ┌────────────────────────┐
+            │  CLI (picocli)          │  Main (full) / CatalogMain (no free-form query)
+            │  ConnectionOptions,     │
+            │  CliErrors, SqlGuard    │
+            └───────────┬────────────┘
+                        │
+            ┌───────────▼────────────┐
+            │   MetadataPipeline      │  12 sequential steps
+            └───────────┬────────────┘
+                        │
+            ┌───────────▼────────────┐        ┌──────────────────────┐
+            │  Source / JdbcSource    │───────▶│ FirebirdCatalog       │  RDB$ reader → FbTable
+            │  + DriverHints          │        └──────────┬───────────┘
+            └───────────┬────────────┘                   │
+                        │                     ┌──────────▼───────────┐
+            ┌───────────▼────────────┐        │ FirebirdDdlBuilder    │  ddl.sql / triggers.sql
+            │ JsonWriter / StableOutput│       └──────────────────────┘
+            │ TsvWriter / SqlFileWriter│
+            └────────────────────────┘
 ```
 
-Eleven small `Extractor` classes — one per metadata concept (columns, primary key, foreign keys, indexes, unique/check constraints, sample, column stats, partitioning, cardinality, table info) — each delegates to the matching `Source` method. The pipeline runs them sequentially against a single connection and assembles the result into the `Metadata` record. The `JsonWriter` and (optional) `TsvWriter` consume that record graph.
+The pipeline runs one step per metadata concept (table info, columns, primary key, foreign keys, indexes, unique and check constraints, triggers, sample, column stats, partitioning, cardinality) against a single connection and assembles the `Metadata` record. On Firebird, `FirebirdCatalog` reads the table once and feeds both `metadata.json` and the DDL builder, so the two cannot disagree.
 
-The HTTP layer reuses the same pipeline and the same record graph; the only difference is that HTTP gets its `Connection` from a HikariCP pool keyed by a normalized URL (ephemeral params like `connectTimeout` are stripped before keying so they don't fragment pools).
-
-Full design rationale lives in [`docs/superpowers/specs/2026-05-09-singularidade-data-bridge-design.md`](docs/superpowers/specs/2026-05-09-singularidade-data-bridge-design.md). Implementation history (31 TDD tasks) lives in [`docs/superpowers/plans/2026-05-09-singularidade-data-bridge-mvp.md`](docs/superpowers/plans/2026-05-09-singularidade-data-bridge-mvp.md).
+Design history: [`docs/superpowers/specs/`](docs/superpowers/specs/) (original design, and the v0.8.0 Firebird fidelity design) and [`docs/superpowers/plans/`](docs/superpowers/plans/).
 
 ---
 
@@ -593,33 +506,26 @@ Full design rationale lives in [`docs/superpowers/specs/2026-05-09-singularidade
 
 ```bash
 mvn test                 # unit tests + driver-load smoke (no Docker required)
-mvn verify               # adds Postgres + Firebird Testcontainer ITs (Docker required)
-mvn -DskipTests package  # produces target/data-bridge.jar
+mvn verify               # adds the Postgres + Firebird 3/5 Testcontainer ITs (Docker required)
+mvn -DskipTests package  # target/data-bridge.jar and target/data-bridge-catalog.jar
 ```
 
-The build is conventional Maven. Surefire picks up `*Test.java`; Failsafe picks up `*IT.java`. Tests follow `should_<result>_when_<condition>` naming where it reads naturally.
-
-CI runs the full `mvn -B verify` on every push to `main` and every pull request targeting `main` — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tagged releases (`v*`) trigger [`.github/workflows/release.yml`](.github/workflows/release.yml), which republishes the fat JAR and its SHA-256 to a GitHub Release.
+Surefire picks up `*Test.java`; Failsafe picks up `*IT.java`. CI runs `mvn -B verify` on every push to `main` and every pull request, and smoke-checks both JARs — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tags `v*` trigger [`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes both JARs and their SHA-256.
 
 ### Cutting a release
 
-Recommended:
-
 ```bash
-scripts/release.sh 0.7.2
+scripts/release.sh 0.8.1
 ```
 
-This bumps `pom.xml`, runs the full test suite, commits, tags `v0.7.2`, pushes, and bumps to the next development SNAPSHOT — all in one go. The tag push triggers `release.yml`, which builds the fat JAR, computes its SHA-256, and publishes both as a GitHub Release.
-
-Alternatives — manual `git tag` and clicking the **Run workflow** button on the GitHub UI — are documented in [`RELEASING.md`](RELEASING.md) along with versioning policy and recovery procedures.
+Bumps `pom.xml`, runs the full test suite, smoke-checks both JARs, commits, tags, pushes and bumps to the next SNAPSHOT. Alternatives, versioning policy and recovery are in [`RELEASING.md`](RELEASING.md).
 
 ### Project conventions
 
 - **Java 21, no Lombok**, records for DTOs.
-- **Constructor injection only.** No reflection except where Jackson does it for us.
 - **Imports at the top.** No inline FQNs except for genuine name collisions.
 - **No comments unless they explain a *why* that the code can't.** Names carry the *what*.
-- **TDD where it pays.** All extractors landed test-first against a real Postgres in a Testcontainer.
+- **TDD.** Firebird work is tested against a real Firebird 3 container with an SGH-like schema, including a DDL replay check.
 
 ---
 

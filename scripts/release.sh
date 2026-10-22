@@ -20,7 +20,7 @@
 #   7. Commits the next-dev bump.
 #   8. Pushes main + the new tag.
 #   9. The tag push triggers .github/workflows/release.yml, which builds
-#      the fat JAR + sha256 and publishes them as a GitHub Release.
+#      both fat JARs (full + catalog) + sha256 and publishes them as a GitHub Release.
 #
 # Anything fails => the script exits non-zero with the original error.
 # If failure happens AFTER the local tag is created but BEFORE push, you can
@@ -150,6 +150,14 @@ if [ "$JAR_SAYS" != "$EXPECTED" ]; then
     exit 1
 fi
 echo "  ok: $JAR_SAYS"
+test -f target/data-bridge-catalog.jar
+CATALOG_SAYS="$(java -jar target/data-bridge-catalog.jar version)"
+if [ "$CATALOG_SAYS" != "${EXPECTED} (catalog)" ]; then
+    echo "error: catalog jar reports '$CATALOG_SAYS', expected '${EXPECTED} (catalog)'" >&2
+    git checkout -- pom.xml
+    exit 1
+fi
+echo "  ok: $CATALOG_SAYS"
 
 # -- step 4: commit + tag -----------------------------------------------------
 
@@ -158,7 +166,7 @@ echo "→ committing and tagging ${TAG} ..."
 git add pom.xml
 git commit -m "chore: release ${TAG}
 
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git tag -a "${TAG}" -m "Release ${TAG}"
 
 # -- step 5: bump to next snapshot -------------------------------------------
@@ -169,7 +177,7 @@ mvn -B -ntp versions:set -DnewVersion="${NEXT_SNAPSHOT}" -DgenerateBackupPoms=fa
 git add pom.xml
 git commit -m "chore: bump to ${NEXT_SNAPSHOT} for next dev cycle
 
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 # -- step 6: push -------------------------------------------------------------
 
