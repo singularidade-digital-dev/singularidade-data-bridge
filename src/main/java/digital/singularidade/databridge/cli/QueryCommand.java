@@ -1,9 +1,7 @@
 package digital.singularidade.databridge.cli;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import digital.singularidade.databridge.error.DataBridgeException;
 import digital.singularidade.databridge.error.ErrorCodes;
-import digital.singularidade.databridge.output.JsonWriter;
 import digital.singularidade.databridge.output.QueryResult;
 import digital.singularidade.databridge.source.jdbc.JdbcSource;
 import picocli.CommandLine.Command;
@@ -11,8 +9,6 @@ import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
 @Command(name = "query",
@@ -51,9 +47,7 @@ public final class QueryCommand implements Callable<Integer> {
     public Integer call() {
         try (JdbcSource src = JdbcSource.open(conn.resolve())) {
             QueryResult result = src.executeQuery(sql, limit, timeoutSec, writable);
-            ObjectMapper mapper = JsonWriter.newMapper();
-            byte[] body = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(result);
-            writeBody(body);
+            QueryResultWriter.write(result, outFile, quiet);
             return ErrorCodes.OK.exitCode();
         } catch (IOException e) {
             return CliErrors.report(new DataBridgeException(ErrorCodes.OUTPUT_WRITE_FAILED,
@@ -63,18 +57,6 @@ public final class QueryCommand implements Callable<Integer> {
         }
     }
 
-    private void writeBody(byte[] body) throws IOException {
-        if (outFile == null || outFile.equals("-")) {
-            System.out.write(body);
-            System.out.println();
-        } else {
-            Path target = Path.of(outFile);
-            Path dir = target.getParent();
-            if (dir != null) Files.createDirectories(dir);
-            Files.write(target, body);
-            if (!quiet) System.err.println("wrote " + target.toAbsolutePath());
-        }
-    }
 
 
 }

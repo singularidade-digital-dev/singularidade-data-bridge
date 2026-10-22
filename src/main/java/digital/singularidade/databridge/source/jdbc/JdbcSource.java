@@ -15,6 +15,8 @@ import digital.singularidade.databridge.output.Sample;
 import digital.singularidade.databridge.output.TableInfo;
 import digital.singularidade.databridge.output.Trigger;
 import digital.singularidade.databridge.output.UniqueConstraint;
+import digital.singularidade.databridge.query.BoundSql;
+import digital.singularidade.databridge.query.NamedQuery;
 import digital.singularidade.databridge.query.SqlGuard;
 import digital.singularidade.databridge.source.Source;
 import digital.singularidade.databridge.source.jdbc.firebird.FbTable;
@@ -27,10 +29,13 @@ import digital.singularidade.databridge.source.jdbc.firebird.FbTable.FbTrigger;
 import digital.singularidade.databridge.source.jdbc.firebird.FirebirdCatalog;
 import digital.singularidade.databridge.source.jdbc.firebird.FirebirdTypes;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
 import java.sql.DriverManager;
+import java.sql.JDBCType;
+import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -45,10 +50,12 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1160,6 +1167,83 @@ public final class JdbcSource implements Source {
                 try { connection.setReadOnly(true); } catch (SQLException ignored) {}
             }
         }
+    }
+
+    /**
+     * Run a named query read-only: guard it like {@code query}, bind each {@code :param} with the value
+     * converted to the type the driver reports for its placeholder, and collect at most {@code limit} rows.
+     */
+    public QueryResult executeNamed(NamedQuery query, Map<String, String> params, int limit, int timeoutSec) {
+        if (limit <= 0) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "limit must be > 0 (got " + limit + ")", "pass --limit 100 (or any positive value)");
+        }
+        BoundSql bound = BoundSql.of(SqlGuard.check(query.sql(), hints, false));
+        Map<String, String> given = params == null ? Map.of() : params;
+        Set<String> needed = new LinkedHashSet<>(bound.parameterNames());
+        List<String> missing = needed.stream().filter(k -> !given.containsKey(k)).toList();
+        List<String> unknown = given.keySet().stream().filter(k -> !needed.contains(k)).toList();
+        if (!missing.isEmpty()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "missing parameter(s) for '" + query.name() + "': " + String.join(", ", missing),
+                "pass --param NAME=VALUE for each :NAME in the query");
+        }
+        if (!unknown.isEmpty()) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "unknown parameter(s) for '" + query.name() + "': " + String.join(", ", unknown), null);
+        }
+        long t0 = System.nanoTime();
+        try (PreparedStatement ps = connection.prepareStatement(bound.jdbcSql())) {
+            ParameterMetaData pmd = null;
+            try { pmd = ps.getParameterMetaData(); } catch (SQLException ignored) { /* bind as text */ }
+            List<String> names = bound.parameterNames();
+            for (int i = 1; i <= names.size(); i++) {
+                int type = Types.VARCHAR;
+                if (pmd != null) {
+                    try { type = pmd.getParameterType(i); } catch (SQLException ignored) { /* text */ }
+                }
+                bind(ps, i, names.get(i - 1), given.get(names.get(i - 1)), type);
+            }
+            if (timeoutSec > 0) ps.setQueryTimeout(timeoutSec);
+            ps.setMaxRows(limit + 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                return collectRows(rs, limit, (System.nanoTime() - t0) / 1_000_000);
+            }
+        } catch (SQLException e) {
+            throw new DataBridgeException(ErrorCodes.QUERY_FAILED,
+                "query '" + query.name() + "' failed: " + e.getMessage(),
+                "verify the SQL is valid for the target driver", e);
+        }
+    }
+
+    private static void bind(PreparedStatement ps, int index, String name, String value, int sqlType)
+            throws SQLException {
+        try {
+            switch (sqlType) {
+                case Types.INTEGER, Types.SMALLINT, Types.TINYINT -> ps.setInt(index, Integer.parseInt(value.strip()));
+                case Types.BIGINT -> ps.setLong(index, Long.parseLong(value.strip()));
+                case Types.NUMERIC, Types.DECIMAL -> ps.setBigDecimal(index, new BigDecimal(value.strip()));
+                case Types.REAL, Types.FLOAT, Types.DOUBLE -> ps.setDouble(index, Double.parseDouble(value.strip()));
+                case Types.BOOLEAN, Types.BIT -> ps.setBoolean(index, parseBoolean(value));
+                case Types.DATE -> ps.setDate(index, Date.valueOf(value.strip()));
+                case Types.TIME -> ps.setTime(index, Time.valueOf(value.strip()));
+                case Types.TIMESTAMP -> ps.setTimestamp(index, Timestamp.valueOf(value.strip().replace('T', ' ')));
+                default -> ps.setString(index, value);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new DataBridgeException(ErrorCodes.INVALID_ARGS,
+                "parameter " + name + ": cannot convert '" + value + "' to " + JDBCType.valueOf(sqlType).getName(),
+                "dates are yyyy-mm-dd, timestamps yyyy-mm-dd hh:mm:ss", e);
+        }
+    }
+
+    private static boolean parseBoolean(String value) {
+        String v = value.strip().toLowerCase(Locale.ROOT);
+        return switch (v) {
+            case "true", "t", "1", "yes", "y" -> true;
+            case "false", "f", "0", "no", "n" -> false;
+            default -> throw new IllegalArgumentException("not a boolean: " + value);
+        };
     }
 
     private QueryResult collectRows(ResultSet rs, int limit, long elapsedMs) throws SQLException {
