@@ -1,12 +1,19 @@
 package digital.singularidade.databridge.source.jdbc;
 
+import digital.singularidade.databridge.source.jdbc.firebird.NoneText;
+
 import java.util.Properties;
 
 /**
- * JDBC URL plus credentials given outside it. {@code user}/{@code password} are {@code null} when the
- * URL carries them (or the driver needs none).
+ * JDBC URL plus what is given outside it: credentials ({@code null} when the URL carries them or the driver
+ * needs none) and, for Firebird, the fallback charset for {@code CHARACTER SET NONE} text that is not
+ * valid UTF-8 (see {@link NoneText}).
  */
-public record ConnectionSettings(String url, String user, String password) {
+public record ConnectionSettings(String url, String user, String password, String noneCharset) {
+
+    public ConnectionSettings(String url, String user, String password) {
+        this(url, user, password, NoneText.DEFAULT_FALLBACK);
+    }
 
     /** Driver properties: only the credentials that were given. */
     public Properties toProperties() {
@@ -18,6 +25,7 @@ public record ConnectionSettings(String url, String user, String password) {
 
     @Override
     public String toString() {
-        return "ConnectionSettings[url=" + url + ", user=" + user + ", password=" + (password == null ? null : "***") + "]";
+        return "ConnectionSettings[url=" + url + ", user=" + user + ", password="
+            + (password == null ? null : "***") + ", noneCharset=" + noneCharset + "]";
     }
 }

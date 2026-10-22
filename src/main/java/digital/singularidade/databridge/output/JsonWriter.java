@@ -1,6 +1,8 @@
 package digital.singularidade.databridge.output;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.util.DefaultIndenter;
+import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -14,11 +16,18 @@ import java.nio.file.StandardCopyOption;
 
 public final class JsonWriter {
 
+    /**
+     * Pretty-printed, UTF-8, and always {@code \n} line breaks — Jackson's default pretty printer uses the
+     * platform line separator, which would make files differ between Windows and Linux.
+     */
     public static ObjectMapper newMapper() {
+        DefaultPrettyPrinter printer = new DefaultPrettyPrinter()
+            .withObjectIndenter(new DefaultIndenter("  ", "\n"));
         return new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .enable(SerializationFeature.INDENT_OUTPUT)
+            .setDefaultPrettyPrinter(printer)
             .setSerializationInclusion(JsonInclude.Include.ALWAYS);
     }
 

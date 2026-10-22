@@ -104,4 +104,15 @@ class ConnectionOptionsTest {
         assertThat(p).containsEntry("user", "SYSDBA").containsEntry("password", "pw");
         assertThat(new ConnectionSettings("u", null, null).toProperties()).isEmpty();
     }
+
+    @Test
+    void should_default_the_none_charset_to_win1252_and_accept_firebird_names() {
+        assertThat(parse("--jdbc-url", "u").resolve(NO_ENV).noneCharset()).isEqualTo("WIN1252");
+        assertThat(parse("--jdbc-url", "u", "--none-charset", "DOS850").resolve(NO_ENV).noneCharset()).isEqualTo("DOS850");
+    }
+
+    @Test
+    void should_reject_an_unknown_none_charset() {
+        assertInvalid(parse("--jdbc-url", "u", "--none-charset", "NOPE"), NO_ENV, "NOPE");
+    }
 }
