@@ -1,20 +1,34 @@
 # Monthly dependency updates, few PRs:
-# - minor and patch bumps come grouped, one PR per ecosystem (Maven, GitHub Actions);
-# - every major bump comes in its own PR, to be reviewed on its own (a new major of a JDBC driver
-#   or of JUnit can change behavior);
-# - at most 5 open version-update PRs per ecosystem.
+# - Maven: minor and patch bumps come grouped in one PR, except the JDBC drivers, which come grouped
+#   in a PR of their own (see the jdbc-drivers group); every major bump comes in its own PR, to be
+#   reviewed on its own (a new major of a JDBC driver or of JUnit can change behavior);
+# - GitHub Actions: every update in one PR (see the github-actions group).
 # Security updates are not affected by the schedule: Dependabot opens them as soon as an advisory appears.
-# Every PR runs the full CI (unit + Postgres/Firebird ITs). Oracle, SQL Server and MySQL only have a
-# driver-load smoke test, so a bump of one of those drivers needs a check against a real database.
+# Every PR runs the full CI (unit + Postgres/Firebird ITs).
 version: 2
 updates:
   - package-ecosystem: maven
     directory: /
     schedule:
       interval: monthly
-    open-pull-requests-limit: 5
+    # Once this many version-update PRs are open, Dependabot opens no new one (security updates have a
+    # separate limit of 10). The two groups plus the three majors open today (JUnit 6, MySQL 26,
+    # SQL Server 13) already make five, so 5 would keep the next month's PRs out; 10 leaves room.
+    open-pull-requests-limit: 10
     labels: [dependencies, java]
     groups:
+      # The drivers are how the CLI reads every database, and CI does not test them all: the Postgres
+      # and Firebird ITs run against real containers, but Oracle, SQL Server and MySQL only have a
+      # driver-load smoke test. Before merging, check a bump of one of those three against a real
+      # database. In a group of their own they keep the routine PR mergeable on a green CI.
+      jdbc-drivers:
+        patterns:
+          - 'org.postgresql:*'
+          - 'org.firebirdsql.jdbc:*'
+          - 'com.oracle.database.jdbc:*'
+          - 'com.microsoft.sqlserver:*'
+          - 'com.mysql:*'
+        update-types: [minor, patch]
       maven-minor-and-patch:
         update-types: [minor, patch]
 
@@ -25,5 +39,11 @@ updates:
     open-pull-requests-limit: 5
     labels: [dependencies, github_actions]
     groups:
-      github-actions-minor-and-patch:
-        update-types: [minor, patch]
+      # Every action here is pinned to a major tag (actions/checkout@v7) and Dependabot keeps that
+      # precision, so it only ever proposes the next major: a minor-and-patch group would never get
+      # anything. All of them come in one PR instead of one PR per action: the actions/* majors
+      # usually ship together (a runtime change), and CI runs checkout, setup-java and upload-artifact
+      # on the PR. The attest actions run only in release.yml, at a release, so read their release
+      # notes before merging.
+      github-actions:
+        patterns: ['*']
