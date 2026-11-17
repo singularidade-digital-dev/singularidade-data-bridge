@@ -1,12 +1,19 @@
-# Weekly dependency updates. Minor/patch Maven bumps and all action bumps are grouped into one PR each;
-# major Maven bumps come one per PR. Every PR runs the full CI (unit + Postgres/Firebird ITs).
+# Monthly dependency updates, few PRs:
+# - minor and patch bumps come grouped, one PR per ecosystem (Maven, GitHub Actions);
+# - every major bump comes in its own PR, to be reviewed on its own (a new major of a JDBC driver
+#   or of JUnit can change behavior);
+# - at most 5 open version-update PRs per ecosystem.
+# Security updates are not affected by the schedule: Dependabot opens them as soon as an advisory appears.
+# Every PR runs the full CI (unit + Postgres/Firebird ITs). Oracle, SQL Server and MySQL only have a
+# driver-load smoke test, so a bump of one of those drivers needs a check against a real database.
 version: 2
 updates:
   - package-ecosystem: maven
     directory: /
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels: [dependencies, java]
     groups:
       maven-minor-and-patch:
         update-types: [minor, patch]
@@ -14,7 +21,9 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels: [dependencies, github_actions]
     groups:
-      github-actions:
-        patterns: ["*"]
+      github-actions-minor-and-patch:
+        update-types: [minor, patch]
