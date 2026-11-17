@@ -6,6 +6,11 @@ those changes are listed under **Changed** or **Removed**).
 
 ## [Unreleased]
 
+### Changed
+- Dependencies shipped in the JARs: picocli 4.7.7, Jackson 2.22.4. JDBC drivers are unchanged.
+- Build and test tooling: AssertJ 3.27.7, Testcontainers 1.21.4, H2 2.5.252, SLF4J 2.0.20, maven-compiler 3.16.0, Surefire/Failsafe 3.6.1, maven-shade 3.6.2; GitHub Actions checkout v7, setup-java v6, upload-artifact v7.
+- `-DskipTests` no longer skips the integration tests (Failsafe 3.6). Use `-DskipITs` to skip only those, or `-Dmaven.test.skip=true` to skip all. `mvn -DskipTests package` is unaffected.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added
