@@ -32,7 +32,7 @@
 
         <postgres.version>42.7.14</postgres.version>
         <jaybird.version>6.0.7</jaybird.version>
-        <ojdbc.version>23.6.0.24.10</ojdbc.version>
+        <ojdbc.version>23.26.4.0.0</ojdbc.version>
         <mssql.version>12.10.2.jre11</mssql.version>
         <mysql.version>9.7.0</mysql.version>
 
