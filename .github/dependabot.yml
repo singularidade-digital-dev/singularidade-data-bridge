@@ -1,20 +1,56 @@
-# Weekly dependency updates. Minor/patch Maven bumps and all action bumps are grouped into one PR each;
-# major Maven bumps come one per PR. Every PR runs the full CI (unit + Postgres/Firebird ITs).
+# Monthly dependency updates, few PRs:
+# - Maven: minor and patch bumps come grouped in one PR, except the JDBC drivers, which come grouped
+#   in a PR of their own (see the jdbc-drivers group); every major bump comes in its own PR, to be
+#   reviewed on its own (a new major of a JDBC driver or of JUnit can change behavior);
+# - GitHub Actions: every update in one PR (see the github-actions group).
+# Security updates are not affected by the schedule: Dependabot opens them as soon as an advisory appears.
+# Every PR runs the full CI (unit + Postgres/Firebird ITs).
 version: 2
 updates:
   - package-ecosystem: maven
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    # Once this many version-update PRs are open, Dependabot opens no new one (security updates have a
+    # separate limit of 10). The two groups plus the three majors open today (JUnit 6, MySQL 26,
+    # SQL Server 13) already make five, so 5 would keep the next month's PRs out; 10 leaves room.
     open-pull-requests-limit: 10
+    labels: [dependencies, java]
     groups:
+      # The drivers are how the CLI reads every database, and CI does not test them all: the Postgres
+      # and Firebird ITs run against real containers, but Oracle, SQL Server and MySQL only have a
+      # driver-load smoke test. Before merging, check a bump of one of those three against a real
+      # database. In a group of their own they keep the routine PR mergeable on a green CI.
+      jdbc-drivers:
+        patterns:
+          - 'org.postgresql:*'
+          - 'org.firebirdsql.jdbc:*'
+          - 'com.oracle.database.jdbc:*'
+          - 'com.microsoft.sqlserver:*'
+          - 'com.mysql:*'
+        update-types: [minor, patch]
+      # A dependency that matches more than one group goes to the most specific one, not to the
+      # first one listed: GitHub's documentation still says "first", but the updater has scored the
+      # patterns since dependabot-core#14861 (May 2026). An exact name scores 1000, a pattern with a
+      # wildcard about 100 ('org.postgresql:*' scores 101, 'com.mysql:*' 96), the lone '*' 1, and a
+      # group without patterns 500. Without patterns: ['*'] this catch-all would outrank jdbc-drivers
+      # and take every driver; with it, it keeps only what no other group claims.
       maven-minor-and-patch:
+        patterns: ['*']
         update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels: [dependencies, github_actions]
     groups:
+      # Every action here is pinned to a major tag (actions/checkout@v7) and Dependabot keeps that
+      # precision, so it only ever proposes the next major: a minor-and-patch group would never get
+      # anything. All of them come in one PR instead of one PR per action: the actions/* majors
+      # usually ship together (a runtime change), and CI runs checkout, setup-java and upload-artifact
+      # on the PR. The attest actions run only in release.yml, at a release, so read their release
+      # notes before merging.
       github-actions:
-        patterns: ["*"]
+        patterns: ['*']
