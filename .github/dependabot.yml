@@ -29,7 +29,14 @@ updates:
           - 'com.microsoft.sqlserver:*'
           - 'com.mysql:*'
         update-types: [minor, patch]
+      # A dependency that matches more than one group goes to the most specific one, not to the
+      # first one listed: GitHub's documentation still says "first", but the updater has scored the
+      # patterns since dependabot-core#14861 (May 2026). An exact name scores 1000, a pattern with a
+      # wildcard about 100 ('org.postgresql:*' scores 101, 'com.mysql:*' 96), the lone '*' 1, and a
+      # group without patterns 500. Without patterns: ['*'] this catch-all would outrank jdbc-drivers
+      # and take every driver; with it, it keeps only what no other group claims.
       maven-minor-and-patch:
+        patterns: ['*']
         update-types: [minor, patch]
 
   - package-ecosystem: github-actions
